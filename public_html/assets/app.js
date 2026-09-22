@@ -84,24 +84,36 @@ function newTask(studentId='',task=null,scope='single'){
  openModal(task?(scope==='group'?'Изменить задание для всех':'Редактировать задание'):'Новое задание',`<form data-form="save_task">${task?`<input type="hidden" name="id" value="${task.id}">`:''}${recipients}${field('Название задания','title',task?.title||'','text','required maxlength="125" placeholder="Например, Циклы и обработка чисел"')}${field('Предмет или тема','subject',task?.subject||'Информатика','text','required maxlength="50"')}${area('Условие задания','description',task?.description||'','required maxlength="10000" placeholder="Что нужно сделать? Добавь условие и пояснения."')}${field('Ссылка на материалы (необязательно)','resource_url',task?.resource_url||'','url','maxlength="2000" placeholder="https://…"')}<div class="form-row">${field('Срок (необязательно)','due_date',task?.due_date||'','date')}${field('Максимальный балл','max_score',task?.max_score||10,'number','required min="1" max="1000" step="1"')}</div>${inlineFiles('Файлы к заданию')}${actions(task?'Сохранить изменения':'Назначить задание')}</form>`);
 }
 const fileSize = bytes => bytes < 1024 ? bytes+' Б' : bytes < 1024*1024 ? (bytes/1024).toFixed(1)+' КБ' : (bytes/1024/1024).toFixed(1)+' МБ';
+const acceptedFiles='.xlsx,.xls,.csv,.txt,.md,.py,.js,.ts,.jsx,.tsx,.html,.css,.json,.xml,.yaml,.yml,.sql,.java,.c,.cpp,.h,.hpp,.cs,.go,.rs,.php,.sh,.ini,.toml';
+const previewExtensions=new Set(['txt','csv','md','py','js','ts','jsx','tsx','html','css','json','xml','yaml','yml','sql','java','c','cpp','h','hpp','cs','go','rs','php','sh','ini','toml']);
+const extensionOf=name=>(String(name).split('.').pop()||'').toLowerCase();
+function fileTree(files,t,editable){
+ const root={folders:new Map(),files:[]};
+ for(const file of files){let node=root,parts=String(file.relative_path||file.path||file.name).split('/').filter(Boolean);for(const part of parts.slice(0,-1)){if(!node.folders.has(part))node.folders.set(part,{folders:new Map(),files:[]});node=node.folders.get(part);}node.files.push(file);}
+ const render=node=>`${[...node.folders.entries()].sort(([a],[b])=>a.localeCompare(b,'ru')).map(([name,child])=>`<details class="file-folder" open><summary><span>⌄</span> ${esc(name)}</summary><div>${render(child)}</div></details>`).join('')}${node.files.sort((a,b)=>String(a.name).localeCompare(String(b.name),'ru')).map(file=>{const path=file.relative_path||file.path||file.name,previewable=previewExtensions.has(extensionOf(file.name));return `<div class="file-tree-row">${previewable?`<button type="button" class="file-open" data-action="preview-file" data-id="${file.id}" title="${esc(path)}"><span class="file-type">${esc(extensionOf(file.name)||'file')}</span><span>${esc(file.name)}</span></button>`:`<a class="file-open" href="api.php?action=download&id=${file.id}" ${demo?'data-action="demo-download"':''} title="Скачать ${esc(path)}"><span class="file-type">${esc(extensionOf(file.name)||'file')}</span><span>${esc(file.name)}</span></a>`}${editable?`<button type="button" class="file-remove" data-action="remove-file" data-id="${file.id}" data-task="${t.id}" aria-label="Убрать файл ${esc(file.name)}">×</button>`:''}</div>`;}).join('')}`;
+ return render(root);
+}
 function attachmentSection(t,kind,editable,showUpload=true){
  const files=(t.attachments||[]).filter(f=>f.kind===kind);
  if(!files.length&&!editable)return '';
- return `<section class="detail-section"><h3>${kind==='material'?'Файлы к заданию':'Файлы решения'}</h3><ul class="attachment-list">${files.map(f=>`<li><div><a href="api.php?action=download&id=${f.id}" ${demo?'data-action="demo-download"':''}>${esc(f.name)}</a><span class="small muted">${fileSize(f.size)}</span></div>${editable?`<button type="button" class="btn ghost" data-action="remove-file" data-id="${f.id}" data-task="${t.id}" aria-label="Убрать файл ${esc(f.name)}">Убрать</button>`:''}</li>`).join('')}</ul>${editable&&showUpload?`<form data-form="upload"><input type="hidden" name="task_id" value="${t.id}"><input type="hidden" name="kind" value="${kind}"><label class="field">Прикрепить файлы<input type="file" name="files" accept=".xlsx,.xls,.csv,.txt" multiple required></label><p class="small muted">Excel, CSV или TXT · До 10 МБ каждый · До 20 файлов</p>${errorBox()}<button type="submit" class="btn secondary" style="margin-top:12px">Загрузить файлы</button><p class="small muted" role="status" data-upload-status></p></form>`:''}</section>`;
+ const browser=kind==='material'&&files.length?`<div class="file-explorer"><div class="file-tree" aria-label="Файлы задания"><div class="file-tree-title">ПРОВОДНИК <span>${files.length}</span></div>${fileTree(files,t,editable)}</div><div class="file-preview" data-file-preview><div class="file-preview-empty">Выбери текстовый файл слева, чтобы открыть его здесь.<br><span>Excel-файлы можно скачать.</span></div></div></div>`:`<ul class="attachment-list">${files.map(f=>`<li><div><a href="api.php?action=download&id=${f.id}" ${demo?'data-action="demo-download"':''}>${esc(f.name)}</a><span class="small muted">${fileSize(f.size)}</span></div>${editable?`<button type="button" class="btn ghost" data-action="remove-file" data-id="${f.id}" data-task="${t.id}" aria-label="Убрать файл ${esc(f.name)}">Убрать</button>`:''}</li>`).join('')}</ul>`;
+ return `<section class="detail-section"><h3>${kind==='material'?'Файлы к заданию':'Файлы решения'}</h3>${browser}${editable&&showUpload?`<form data-form="upload" class="file-upload-form"><input type="hidden" name="task_id" value="${t.id}"><input type="hidden" name="kind" value="${kind}">${fileInputs('Прикрепить отдельные файлы')}<p class="small muted">Код, текст, таблицы и папки · До 10 МБ каждый · До 20 файлов</p>${errorBox()}<button type="submit" class="btn secondary" style="margin-top:12px">Загрузить файлы</button><p class="small muted" role="status" data-upload-status></p></form>`:''}</section>`;
 }
 const uploadedSelections = new WeakMap();
-function inlineFiles(label){return `<label class="field">${label} (необязательно)<input type="file" name="files" accept=".xlsx,.xls,.csv,.txt" multiple></label><p class="small muted">Excel, CSV или TXT · До 10 МБ каждый · До 20 файлов. Файлы загрузятся при сохранении.</p><p class="small muted" role="status" data-upload-status></p>`;}
-function selectedFiles(form){return Array.from(form.elements.files?.files||[]);}
+function fileInputs(label){return `<div class="file-pickers"><label class="field">${label}<input type="file" name="files" accept="${acceptedFiles}" multiple></label><label class="field folder-picker">Или выбрать папку<input type="file" name="folder_files" accept="${acceptedFiles}" webkitdirectory directory multiple></label></div>`;}
+function inlineFiles(label){return `${fileInputs(label+' (необязательно)')}<p class="small muted">Код, текст, Excel, CSV или целая папка · До 10 МБ каждый · До 20 файлов. Структура папок сохранится.</p><p class="small muted" role="status" data-upload-status></p>`;}
+function selectedFiles(form){return [...Array.from(form.elements.files?.files||[]),...Array.from(form.elements.folder_files?.files||[])];}
 function validateFiles(files){
  if(files.length>20)throw new Error('Можно выбрать не более 20 файлов.');
- if(files.some(f=>f.size>10*1024*1024||! /\.(xlsx|xls|csv|txt)$/i.test(f.name)))throw new Error('Выбери файлы XLSX, XLS, CSV или TXT не больше 10 МБ каждый.');
+ if(files.some(f=>f.size>10*1024*1024||!previewExtensions.has(extensionOf(f.name))&&!['xlsx','xls'].includes(extensionOf(f.name))))throw new Error('Можно загружать код, текст, CSV и Excel-файлы не больше 10 МБ каждый.');
  if(demo&&files.length)throw new Error('Загрузка доступна в настоящем кабинете. Демоверсия не хранит файлы.');
 }
 async function sendAttachment(id,kind,file){
- const body=new FormData();body.append('task_id',id);body.append('kind',kind);body.append('file',file);
+ const body=new FormData();body.append('task_id',id);body.append('kind',kind);body.append('path',file.webkitRelativePath||file.name);body.append('file',file);
  const response=await fetch('api.php?action=upload',{method:'POST',credentials:'same-origin',headers:{'X-CSRF-Token':csrf},body});
  let result;try{result=await response.json();}catch{throw new Error('Сервер отклонил файл. Проверь размер и лимиты загрузки PHP на хостинге.');}
  if(!response.ok)throw new Error(result.error||'Файл не загружен.');
+ return result;
 }
 async function uploadSelected(form,idOrIds,kind){
  const ids=Array.isArray(idOrIds)?idOrIds:[idOrIds],files=selectedFiles(form),done=uploadedSelections.get(form)||new Map();uploadedSelections.set(form,done);
@@ -118,21 +130,24 @@ async function uploadSelected(form,idOrIds,kind){
 function solutionDraft(){const f=$('[data-form="submit"],[data-form="review"]',modal);return f?{form:f.dataset.form,values:Object.fromEntries([...new FormData(f)].filter(([,value])=>typeof value==='string'))}:null;}
 async function redrawDetail(id,draft){await refresh();detail(id);const f=draft?$(`[data-form="${draft.form}"]`,modal):null;if(f)for(const [name,value]of Object.entries(draft.values)){if(f.elements[name])f.elements[name].value=value;}}
 async function uploadFiles(form){
- const files=Array.from(form.elements.files.files),id=Number(form.elements.task_id.value),kind=form.elements.kind.value;
+ const files=selectedFiles(form),id=Number(form.elements.task_id.value),kind=form.elements.kind.value;
  const error=$('.form-error',form),button=$('[type="submit"]',form);error.textContent='';
- if(files.some(f=>f.size>10*1024*1024||! /\.(xlsx|xls|csv|txt)$/i.test(f.name))){error.textContent='Выбери файлы XLSX, XLS, CSV или TXT не больше 10 МБ каждый.';return;}
+ try{validateFiles(files);if(!files.length)throw new Error('Выбери хотя бы один файл или папку.');}catch(e){error.textContent=e.message;return;}
  let uploaded=0;button.disabled=true;let failure='';
  try{for(const file of files){
   $('[data-upload-status]',form).textContent=`Загружаем ${uploaded+1} из ${files.length}: ${file.name}`;
-  if(demo)throw new Error('Загрузка доступна в настоящем кабинете. Демоверсия не хранит файлы.');
-  const body=new FormData();body.append('task_id',id);body.append('kind',kind);body.append('file',file);
-  const response=await fetch('api.php?action=upload',{method:'POST',credentials:'same-origin',headers:{'X-CSRF-Token':csrf},body});
-  let result;try{result=await response.json();}catch{throw new Error('Сервер отклонил файл. Проверь размер и лимиты загрузки PHP на хостинге.');}
-  if(!response.ok)throw new Error(result.error||'Файл не загружен.');uploaded++;
+  await sendAttachment(id,kind,file);uploaded++;
  }}catch(e){failure=e.message;}finally{button.disabled=false;}
  if(uploaded){const draft=solutionDraft();await redrawDetail(id,draft);toast(`Загружено файлов: ${uploaded}`);}
  if(failure){const current=$(`[data-form="upload"] [name="kind"][value="${kind}"]`,modal)?.form||form;$('.form-error',current).textContent=failure+(uploaded?' Уже загруженные файлы сохранены. Повтори загрузку только оставшихся файлов.':'');}
  else $('[data-upload-status]',form).textContent='';
+}
+async function previewFile(id,button){
+ const pane=button.closest('.file-explorer')?.querySelector('[data-file-preview]');if(!pane)return;
+ $$('.file-open.active',button.closest('.file-tree')).forEach(item=>item.classList.remove('active'));button.classList.add('active');pane.innerHTML='<div class="file-preview-empty">Открываем файл…</div>';
+ let result;if(demo)result=demoPreviewFiles[id];else{const response=await fetch(`api.php?action=preview&id=${id}`,{credentials:'same-origin'});try{result=await response.json();}catch{throw new Error('Не удалось открыть файл.');}if(!response.ok){pane.innerHTML=`<div class="file-preview-empty">${esc(result.error||'Не удалось открыть файл.')}</div>`;return;}}
+ const lines=String(result.content).replace(/\r\n?/g,'\n').split('\n');
+ pane.innerHTML=`<div class="file-preview-head"><span>${esc(result.path)}</span><a href="api.php?action=download&id=${result.id}" ${demo?'data-action="demo-download"':''}>Скачать</a></div><div class="code-view" aria-label="Содержимое ${esc(result.name)}">${lines.map((line,index)=>`<div class="code-line"><span>${index+1}</span><code>${line?esc(line):'&nbsp;'}</code></div>`).join('')}</div>`;
 }
 function detail(id){
  const t=tasks.find(t=>t.id===id);if(!t)return;
@@ -153,6 +168,7 @@ document.addEventListener('click',async event=>{
  const action=button.dataset.action,id=Number(button.dataset.id);
  if(action==='demo-download'){event.preventDefault();toast('Файлы доступны в настоящем кабинете.');return;}
  try{
+  if(action==='preview-file'){await previewFile(id,button);return;}
   if(action==='remove-file'){const taskId=Number(button.dataset.task),draft=solutionDraft();button.disabled=true;try{await api('remove_attachment',{id});await redrawDetail(taskId,draft);toast('Файл убран из задания');}finally{button.disabled=false;}return;}
   if(action==='close')closeModal();
   if(action==='retry')start();
@@ -211,8 +227,9 @@ const dayOffset=n=>{const d=new Date();d.setDate(d.getDate()+n);return d.toISOSt
 let demoStudents=[{id:2,name:'Александр Морозов',login:'alex.morozov',role:'student',active:1},{id:3,name:'Анна Смирнова',login:'anna.smirnova',role:'student',active:1},{id:4,name:'Михаил Волков',login:'m.volkov',role:'student',active:1}];
 let demoUser={...demoStudents[0]};
 const base={resource_url:'',solution_url:'',feedback:'',solution:'',score:null,max_score:10,group_id:null,submitted_at:null,completed_at:null,created_at:dayOffset(-14),updated_at:dayOffset(0)};
+const demoPreviewFiles={101:{id:101,name:'main.py',path:'starter/main.py',extension:'py',size:126,content:'n = int(input())\n\ntotal = 0\nfor value in range(1, n + 1):\n    if value % 2 == 0:\n        total += value\n\nprint(total)'},102:{id:102,name:'8.txt',path:'data/8.txt',extension:'txt',size:6,content:'10\n24\n'}};
 let demoTasks=[
- {...base,id:1,student_id:2,student_name:demoStudents[0].name,title:'Циклы: от простого к сложному',subject:'Python · Циклы',description:'Напиши программу, которая принимает натуральное число N и находит сумму всех чётных чисел от 1 до N включительно. Реши задачу двумя способами: с помощью цикла for и цикла while. Объясни, почему результаты совпадают.',due_date:dayOffset(3),status:'assigned'},
+ {...base,id:1,student_id:2,student_name:demoStudents[0].name,title:'Циклы: от простого к сложному',subject:'Python · Циклы',description:'Напиши программу, которая принимает натуральное число N и находит сумму всех чётных чисел от 1 до N включительно. Реши задачу двумя способами: с помощью цикла for и цикла while. Объясни, почему результаты совпадают.',due_date:dayOffset(3),status:'assigned',attachments:[{id:101,task_id:1,kind:'material',name:'main.py',relative_path:'starter/main.py',size:126},{id:102,task_id:1,kind:'material',name:'8.txt',relative_path:'data/8.txt',size:6},{id:103,task_id:1,kind:'material',name:'results.xlsx',relative_path:'results.xlsx',size:24018}]},
  {...base,id:2,student_id:2,student_name:demoStudents[0].name,title:'Системы счисления',subject:'ЕГЭ · Задание 14',description:'Переведи число 173 из десятичной системы в двоичную и шестнадцатеричную. Покажи промежуточные вычисления и проверь результат обратным переводом.',due_date:dayOffset(1),status:'submitted',solution:'173 = 128 + 32 + 8 + 4 + 1.\nВ двоичной системе: 10101101.\nВ шестнадцатеричной: AD.\nПроверка: 10 × 16 + 13 = 173.',submitted_at:dayOffset(-1)},
  {...base,id:3,student_id:2,student_name:demoStudents[0].name,title:'Логические выражения и таблицы истинности',subject:'ЕГЭ · Задание 2',description:'Построй таблицу истинности для выражения (A ∧ B) ∨ ¬C. Укажи, при каких наборах значений выражение ложно.',due_date:dayOffset(-2),status:'done',score:9,solution:'Выражение ложно, когда C = 1 и хотя бы одна из переменных A, B равна 0.\nНаборы (A, B, C): (0, 0, 1), (0, 1, 1), (1, 0, 1).',feedback:'Все наборы найдены верно! В следующий раз приложи полную таблицу истинности — это поможет проверить, что ни один случай не пропущен.',submitted_at:dayOffset(-4),completed_at:dayOffset(-3)},
  {...base,id:4,student_id:2,student_name:demoStudents[0].name,title:'Строки и поиск подстрок',subject:'Python · Строки',description:'Найди количество вхождений строки «аа» в строку «аааа», включая пересекающиеся вхождения. Напиши универсальную функцию для такого поиска.',due_date:dayOffset(2),status:'revision',solution:'text = "аааа"\nprint(text.count("аа"))',feedback:'Метод count не учитывает пересекающиеся вхождения. Попробуй пройти по всем начальным позициям строки циклом. Для этого примера правильный ответ — 3.',submitted_at:dayOffset(-2)},

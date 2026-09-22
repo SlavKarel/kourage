@@ -71,6 +71,9 @@ try {
     if (!in_array('deleted_at',$taskColumns,true)) $db->exec('ALTER TABLE tasks ADD COLUMN deleted_at TEXT');
     if (!in_array('group_id',$taskColumns,true)) $db->exec('ALTER TABLE tasks ADD COLUMN group_id TEXT');
     $db->exec('CREATE INDEX IF NOT EXISTS idx_tasks_group ON tasks(group_id)');
+    $attachmentColumns=array_column($db->query('PRAGMA table_info(attachments)')->fetchAll(),'name');
+    if(!in_array('relative_path',$attachmentColumns,true))$db->exec('ALTER TABLE attachments ADD COLUMN relative_path TEXT');
+    $db->exec("UPDATE attachments SET relative_path=name WHERE relative_path IS NULL OR relative_path=''");
     if (is_file($private.'/kourage.sqlite')) @chmod($private.'/kourage.sqlite',0600);
     $_SESSION['csrf'] ??= bin2hex(random_bytes(24));
     $action = $_GET['action'] ?? 'bootstrap';
@@ -93,7 +96,7 @@ try {
     }
     if ($user) $_SESSION['last_seen'] = time();
     if ($action === 'bootstrap' && $method === 'GET') reply(['installed'=>$installed,'user'=>$user ? publicUser($user) : null,'csrf'=>$_SESSION['csrf']]);
-    if ($method !== 'POST' && !in_array($action,['state','download'],true)) fail('Используйте POST.',405);
+    if ($method !== 'POST' && !in_array($action,['state','download','preview'],true)) fail('Используйте POST.',405);
     if ($action === 'login' || $action === 'setup') {
         $ipKey = hash('sha256',$action.':'.($_SERVER['REMOTE_ADDR'] ?? 'local'));
         $attempt = run($db,'SELECT * FROM attempts WHERE key=?',[$ipKey])->fetch();
@@ -126,10 +129,10 @@ try {
         reply(['user'=>publicUser($user),'csrf'=>$_SESSION['csrf']]);
     }
     if (!$user) fail('Войдите в свой кабинет.',401);
-    if (in_array($action,['upload','download','remove_attachment'],true)) {
+    if (in_array($action,['upload','download','preview','remove_attachment'],true)) {
         $attachment = null;
         if ($action !== 'upload') {
-            $attachment = run($db,'SELECT * FROM attachments WHERE id=? AND deleted=0',[idValue($action === 'download' ? $_GET : $data,'id')])->fetch();
+            $attachment = run($db,'SELECT * FROM attachments WHERE id=? AND deleted=0',[idValue(in_array($action,['download','preview'],true) ? $_GET : $data,'id')])->fetch();
             if (!$attachment) fail('Файл не найден.',404);
         }
         $taskId = $attachment ? (int)$attachment['task_id'] : idValue($data,'task_id');
@@ -144,6 +147,15 @@ try {
             header('Content-Length: '.filesize($path));
             header('Content-Security-Policy: sandbox');
             session_write_close(); readfile($path); exit;
+        }
+        if($action==='preview'){
+            $path=$directory.'/'.$attachment['storage_name'];$ext=strtolower(pathinfo($attachment['name'],PATHINFO_EXTENSION));
+            $previewable=['txt','csv','md','py','js','ts','jsx','tsx','html','css','json','xml','yaml','yml','sql','java','c','cpp','h','hpp','cs','go','rs','php','sh','ini','toml'];
+            if(!in_array($ext,$previewable,true))fail('Этот формат можно скачать, но нельзя открыть в просмотрщике.',415);
+            if(!is_file($path))fail('Файл отсутствует на сервере. Обратитесь к преподавателю.',404);
+            $size=filesize($path);if($size===false||$size>2*1024*1024)fail('Для просмотра файл должен быть не больше 2 МБ.',413);
+            $content=file_get_contents($path);if($content===false||!preg_match('//u',$content))fail('Файл не является текстовым.',415);
+            reply(['id'=>(int)$attachment['id'],'name'=>$attachment['name'],'path'=>$attachment['relative_path']?:$attachment['name'],'extension'=>$ext,'size'=>$size,'content'=>$content]);
         }
         $kind = $attachment ? $attachment['kind'] : textValue($data,'kind',20,true);
         if (!in_array($kind,['material','solution'],true)) fail('Некорректный тип файла.');
@@ -162,13 +174,19 @@ try {
         $name = basename(str_replace('\\','/',(string)$file['name']));
         if ($name === '' || strlen($name)>240 || preg_match('/[\x00-\x1F\x7F]/',$name) || !preg_match('//u',$name)) fail('Слишком длинное или некорректное имя файла.');
         $ext = strtolower(pathinfo($name,PATHINFO_EXTENSION));
-        if (!in_array($ext,['xlsx','xls','csv','txt'],true)) fail('Поддерживаются только XLSX, XLS, CSV и TXT.');
+        $allowed=['xlsx','xls','csv','txt','md','py','js','ts','jsx','tsx','html','css','json','xml','yaml','yml','sql','java','c','cpp','h','hpp','cs','go','rs','php','sh','ini','toml'];
+        if (!in_array($ext,$allowed,true)) fail('Этот тип файла не поддерживается.');
+        $relative=textValue($data,'path',500);if($relative==='')$relative=$name;$relative=str_replace('\\','/',$relative);
+        if(str_starts_with($relative,'/')||str_contains($relative,'//')||basename($relative)!==$name)fail('Некорректный путь файла.');
+        foreach(explode('/',$relative) as $segment)if($segment===''||$segment==='.'||$segment==='..')fail('Некорректный путь файла.');
         $size = filesize($file['tmp_name']);
         if ($size === false || $size > 10*1024*1024) fail('Максимальный размер файла — 10 МБ.',413);
         if (!is_dir($directory) && !mkdir($directory,0700,true)) fail('Не удалось создать папку для файлов.',503);
         $storage = bin2hex(random_bytes(24)).'.bin'; $path = $directory.'/'.$storage;
         $db->exec('BEGIN IMMEDIATE');
         try {
+            // Publishing the same path again updates that file instead of creating duplicates.
+            if ($kind === 'material') run($db,'UPDATE attachments SET deleted=1 WHERE task_id=? AND kind=? AND relative_path=? AND deleted=0',[$taskId,$kind,$relative]);
             if ((int)run($db,'SELECT COUNT(*) FROM attachments WHERE task_id=? AND kind=? AND deleted=0',[$taskId,$kind])->fetchColumn() >= 20) {
                 $db->exec('ROLLBACK'); fail('Не более 20 файлов одного типа на задание. Уберите лишние вложения.');
             }
@@ -177,10 +195,10 @@ try {
             if ($kind === 'solution' && !in_array($current,['assigned','revision'],true)) { $db->exec('ROLLBACK'); fail('Работа уже отправлена. Обновите страницу.',409); }
             if (!move_uploaded_file($file['tmp_name'],$path)) throw new RuntimeException('Cannot move uploaded file');
             chmod($path,0600);
-            run($db,'INSERT INTO attachments(task_id,uploader_id,kind,name,storage_name,size) VALUES(?,?,?,?,?,?)',[$taskId,$user['id'],$kind,$name,$storage,$size]);
+            run($db,'INSERT INTO attachments(task_id,uploader_id,kind,name,storage_name,size,relative_path) VALUES(?,?,?,?,?,?,?)',[$taskId,$user['id'],$kind,$name,$storage,$size,$relative]);
             $id=(int)$db->lastInsertId(); $db->exec('COMMIT');
         } catch (Throwable $error) { $db->exec('ROLLBACK'); if (is_file($path)) unlink($path); throw $error; }
-        reply(['id'=>$id,'name'=>$name,'size'=>$size],201);
+        reply(['id'=>$id,'name'=>$name,'path'=>$relative,'size'=>$size],201);
     }
     if ($action === 'logout') {
         $_SESSION=[]; session_destroy(); setcookie(session_name(),'', ['expires'=>time()-3600,'path'=>'/','secure'=>$secure,'httponly'=>true,'samesite'=>'Lax']); reply(['ok'=>true]);
@@ -193,8 +211,8 @@ try {
             $students = []; $tasks = run($db,'SELECT tasks.*,? AS student_name FROM tasks WHERE student_id=? AND deleted_at IS NULL ORDER BY updated_at DESC,id DESC',[$user['name'],$user['id']])->fetchAll();
         }
         $files = $user['role'] === 'admin'
-            ? $db->query('SELECT id,task_id,kind,name,size,created_at FROM attachments WHERE deleted=0 ORDER BY id')->fetchAll()
-            : run($db,'SELECT a.id,a.task_id,a.kind,a.name,a.size,a.created_at FROM attachments a JOIN tasks t ON t.id=a.task_id WHERE a.deleted=0 AND t.deleted_at IS NULL AND t.student_id=? ORDER BY a.id',[$user['id']])->fetchAll();
+            ? $db->query('SELECT id,task_id,kind,name,relative_path,size,created_at FROM attachments WHERE deleted=0 ORDER BY id')->fetchAll()
+            : run($db,'SELECT a.id,a.task_id,a.kind,a.name,a.relative_path,a.size,a.created_at FROM attachments a JOIN tasks t ON t.id=a.task_id WHERE a.deleted=0 AND t.deleted_at IS NULL AND t.student_id=? ORDER BY a.id',[$user['id']])->fetchAll();
         $byTask=[]; foreach ($files as $file) $byTask[$file['task_id']][]=$file;
         foreach ($tasks as &$item) $item['attachments']=$byTask[$item['id']] ?? [];
         unset($item);
@@ -277,7 +295,7 @@ try {
                     $storage=bin2hex(random_bytes(24)).'.bin';$to=$private.'/uploads/'.$storage;
                     if(!copy($from,$to))throw new RuntimeException('Cannot copy attachment');
                     chmod($to,0600);$createdFiles[]=$to;
-                    run($db,'INSERT INTO attachments(task_id,uploader_id,kind,name,storage_name,size) VALUES(?,?,?,?,?,?)',[$newId,$user['id'],'material',$material['name'],$storage,$material['size']]);
+                    run($db,'INSERT INTO attachments(task_id,uploader_id,kind,name,storage_name,size,relative_path) VALUES(?,?,?,?,?,?,?)',[$newId,$user['id'],'material',$material['name'],$storage,$material['size'],$material['relative_path']?:$material['name']]);
                 }
             }
             $db->exec('COMMIT');
