@@ -69,6 +69,8 @@ try {
     if (!in_array('deleted_at',$userColumns,true)) $db->exec('ALTER TABLE users ADD COLUMN deleted_at TEXT');
     $taskColumns = array_column($db->query('PRAGMA table_info(tasks)')->fetchAll(),'name');
     if (!in_array('deleted_at',$taskColumns,true)) $db->exec('ALTER TABLE tasks ADD COLUMN deleted_at TEXT');
+    if (!in_array('group_id',$taskColumns,true)) $db->exec('ALTER TABLE tasks ADD COLUMN group_id TEXT');
+    $db->exec('CREATE INDEX IF NOT EXISTS idx_tasks_group ON tasks(group_id)');
     if (is_file($private.'/kourage.sqlite')) @chmod($private.'/kourage.sqlite',0600);
     $_SESSION['csrf'] ??= bin2hex(random_bytes(24));
     $action = $_GET['action'] ?? 'bootstrap';
@@ -239,8 +241,7 @@ try {
         reply(['ok'=>true]);
     }
     if ($action === 'save_task') {
-        requireAdmin($user); $studentId = idValue($data,'student_id');
-        if (!run($db,"SELECT id FROM users WHERE id=? AND role='student' AND deleted_at IS NULL",[$studentId])->fetch()) fail('Ученик не найден.',404);
+        requireAdmin($user);
         $title = textValue($data,'title',250,true); $subject = textValue($data,'subject',100,true); $description = textValue($data,'description',20000,true);
         $resource = validLink(textValue($data,'resource_url',2000)); $due = validDate(textValue($data,'due_date',10));
         $max = filter_var($data['max_score'] ?? null,FILTER_VALIDATE_INT);
@@ -248,19 +249,51 @@ try {
         if (!empty($data['id'])) {
             $id = idValue($data,'id'); $task = run($db,'SELECT * FROM tasks WHERE id=? AND deleted_at IS NULL',[$id])->fetch();
             if (!$task) fail('Задание не найдено.',404);
-            if ($task['student_id'] !== $studentId) fail('Нельзя перенести историю задания другому ученику. Создайте новое задание.');
-            if ($task['score'] !== null && $task['score'] > $max) fail('Максимальный балл меньше уже выставленной оценки.');
-            run($db,"UPDATE tasks SET title=?,subject=?,description=?,resource_url=?,due_date=?,max_score=?,updated_at=strftime('%Y-%m-%dT%H:%M:%SZ','now') WHERE id=?",[$title,$subject,$description,$resource,$due,$max,$id]);
+            $studentId = idValue($data,'student_id');
+            if ((int)$task['student_id'] !== $studentId) fail('Нельзя перенести историю задания другому ученику. Создайте новое задание.');
+            $groupScope = ($data['scope'] ?? '') === 'group' && !empty($task['group_id']);
+            $targets = $groupScope
+                ? run($db,'SELECT id,score FROM tasks WHERE group_id=? AND deleted_at IS NULL',[$task['group_id']])->fetchAll()
+                : [['id'=>$id,'score'=>$task['score']]];
+            foreach ($targets as $target) if ($target['score'] !== null && (int)$target['score'] > $max) fail('Максимальный балл меньше уже выставленной оценки.');
+            $ids = array_map(fn($target)=>(int)$target['id'],$targets);
+            $marks = implode(',',array_fill(0,count($ids),'?'));
+            run($db,"UPDATE tasks SET title=?,subject=?,description=?,resource_url=?,due_date=?,max_score=?,updated_at=strftime('%Y-%m-%dT%H:%M:%SZ','now') WHERE id IN ($marks)",array_merge([$title,$subject,$description,$resource,$due,$max],$ids));
         } else {
-            run($db,'INSERT INTO tasks(student_id,title,subject,description,resource_url,due_date,max_score) VALUES(?,?,?,?,?,?,?)',[$studentId,$title,$subject,$description,$resource,$due,$max]); $id=(int)$db->lastInsertId();
+            $rawIds = $data['student_ids'] ?? (isset($data['student_id']) ? [$data['student_id']] : []);
+            if (!is_array($rawIds) || !$rawIds || count($rawIds)>200) fail('Выберите от 1 до 200 учеников.');
+            $studentIds=[]; foreach ($rawIds as $rawId) {
+                $studentId=filter_var($rawId,FILTER_VALIDATE_INT);
+                if ($studentId===false || $studentId<1) fail('Некорректный ученик.');
+                $studentIds[]=(int)$studentId;
+            }
+            $studentIds=array_values(array_unique($studentIds));
+            $marks=implode(',',array_fill(0,count($studentIds),'?'));
+            $found=run($db,"SELECT id FROM users WHERE id IN ($marks) AND role='student' AND active=1 AND deleted_at IS NULL",$studentIds)->fetchAll();
+            if (count($found)!==count($studentIds)) fail('Один из учеников не найден или его доступ приостановлен.',404);
+            $groupId=count($studentIds)>1?bin2hex(random_bytes(12)):null; $ids=[];
+            $db->exec('BEGIN IMMEDIATE');
+            try {
+                foreach ($studentIds as $studentId) {
+                    run($db,'INSERT INTO tasks(student_id,title,subject,description,resource_url,due_date,max_score,group_id) VALUES(?,?,?,?,?,?,?,?)',[$studentId,$title,$subject,$description,$resource,$due,$max,$groupId]);
+                    $ids[]=(int)$db->lastInsertId();
+                }
+                $db->exec('COMMIT');
+            } catch (Throwable $error) { $db->exec('ROLLBACK'); throw $error; }
+            $id=$ids[0];
         }
-        reply(['id'=>$id]);
+        reply(['id'=>$id,'ids'=>$ids,'count'=>count($ids),'group_id'=>$task['group_id'] ?? $groupId ?? null]);
     }
     if ($action === 'delete_task') {
         requireAdmin($user); $id = idValue($data,'id');
-        $changed = run($db,"UPDATE tasks SET deleted_at=strftime('%Y-%m-%dT%H:%M:%SZ','now'),updated_at=strftime('%Y-%m-%dT%H:%M:%SZ','now') WHERE id=? AND deleted_at IS NULL",[$id]);
+        $task=run($db,'SELECT group_id FROM tasks WHERE id=? AND deleted_at IS NULL',[$id])->fetch();
+        if (!$task) fail('Задание не найдено.',404);
+        $groupScope=($data['scope'] ?? '')==='group'&&!empty($task['group_id']);
+        $changed=$groupScope
+            ? run($db,"UPDATE tasks SET deleted_at=strftime('%Y-%m-%dT%H:%M:%SZ','now'),updated_at=strftime('%Y-%m-%dT%H:%M:%SZ','now') WHERE group_id=? AND deleted_at IS NULL",[$task['group_id']])
+            : run($db,"UPDATE tasks SET deleted_at=strftime('%Y-%m-%dT%H:%M:%SZ','now'),updated_at=strftime('%Y-%m-%dT%H:%M:%SZ','now') WHERE id=? AND deleted_at IS NULL",[$id]);
         if (!$changed->rowCount()) fail('Задание не найдено.',404);
-        reply(['ok'=>true]);
+        reply(['ok'=>true,'count'=>$changed->rowCount()]);
     }
     if ($action === 'submit' || $action === 'review') {
         $id=idValue($data,'id');
