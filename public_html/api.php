@@ -240,6 +240,51 @@ try {
         } catch (Throwable $error) { $db->exec('ROLLBACK'); throw $error; }
         reply(['ok'=>true]);
     }
+    if ($action === 'update_recipients') {
+        requireAdmin($user); $id=idValue($data,'id');
+        $source=run($db,'SELECT * FROM tasks WHERE id=? AND deleted_at IS NULL',[$id])->fetch();
+        if (!$source) fail('Задание не найдено.',404);
+        $rawIds=$data['student_ids'] ?? [];
+        if (!is_array($rawIds)||!$rawIds||count($rawIds)>200) fail('Выберите от 1 до 200 учеников.');
+        $studentIds=[]; foreach($rawIds as $rawId){$studentId=filter_var($rawId,FILTER_VALIDATE_INT);if($studentId===false||$studentId<1)fail('Некорректный ученик.');$studentIds[]=(int)$studentId;}
+        $studentIds=array_values(array_unique($studentIds));
+        $current=!empty($source['group_id'])
+            ? run($db,'SELECT * FROM tasks WHERE group_id=? AND deleted_at IS NULL',[$source['group_id']])->fetchAll()
+            : [$source];
+        $currentByStudent=[]; foreach($current as $task)$currentByStudent[(int)$task['student_id']]=$task;
+        $marks=implode(',',array_fill(0,count($studentIds),'?'));
+        $selectedStudents=run($db,"SELECT id,active FROM users WHERE id IN ($marks) AND role='student' AND deleted_at IS NULL",$studentIds)->fetchAll();
+        if(count($selectedStudents)!==count($studentIds))fail('Один из учеников не найден.',404);
+        foreach($selectedStudents as $student)if(!(int)$student['active']&&!isset($currentByStudent[(int)$student['id']]))fail('Сначала возобновите доступ выбранному ученику.');
+        $groupId=count($studentIds)>1?($source['group_id']?:bin2hex(random_bytes(12))):null;
+        $materials=run($db,"SELECT * FROM attachments WHERE task_id=? AND kind='material' AND deleted=0 ORDER BY id",[$source['id']])->fetchAll();
+        $createdFiles=[];$resultIds=[];
+        $db->exec('BEGIN IMMEDIATE');
+        try{
+            foreach($currentByStudent as $studentId=>$task){
+                if(in_array($studentId,$studentIds,true)){
+                    run($db,'UPDATE tasks SET group_id=?,updated_at=strftime(\'%Y-%m-%dT%H:%M:%SZ\',\'now\') WHERE id=?',[$groupId,$task['id']]);
+                    $resultIds[$studentId]=(int)$task['id'];
+                }else run($db,"UPDATE tasks SET deleted_at=strftime('%Y-%m-%dT%H:%M:%SZ','now'),updated_at=strftime('%Y-%m-%dT%H:%M:%SZ','now') WHERE id=?",[$task['id']]);
+            }
+            foreach($studentIds as $studentId){
+                if(isset($resultIds[$studentId]))continue;
+                run($db,'INSERT INTO tasks(student_id,title,subject,description,resource_url,due_date,max_score,group_id) VALUES(?,?,?,?,?,?,?,?)',[$studentId,$source['title'],$source['subject'],$source['description'],$source['resource_url'],$source['due_date'],$source['max_score'],$groupId]);
+                $newId=(int)$db->lastInsertId();$resultIds[$studentId]=$newId;
+                foreach($materials as $material){
+                    $from=$private.'/uploads/'.$material['storage_name'];
+                    if(!is_file($from))throw new RuntimeException('Missing source attachment');
+                    $storage=bin2hex(random_bytes(24)).'.bin';$to=$private.'/uploads/'.$storage;
+                    if(!copy($from,$to))throw new RuntimeException('Cannot copy attachment');
+                    chmod($to,0600);$createdFiles[]=$to;
+                    run($db,'INSERT INTO attachments(task_id,uploader_id,kind,name,storage_name,size) VALUES(?,?,?,?,?,?)',[$newId,$user['id'],'material',$material['name'],$storage,$material['size']]);
+                }
+            }
+            $db->exec('COMMIT');
+        }catch(Throwable $error){$db->exec('ROLLBACK');foreach($createdFiles as $path)if(is_file($path))unlink($path);throw $error;}
+        $ids=array_map(fn($studentId)=>$resultIds[$studentId],$studentIds);
+        reply(['ok'=>true,'id'=>$ids[0],'ids'=>$ids,'count'=>count($ids),'group_id'=>$groupId]);
+    }
     if ($action === 'save_task') {
         requireAdmin($user);
         $title = textValue($data,'title',250,true); $subject = textValue($data,'subject',100,true); $description = textValue($data,'description',20000,true);
