@@ -1,0 +1,42 @@
+name: Обновить сайт на Timeweb
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: timeweb-kourage-production
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    if: github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Получить код
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+
+      - name: Проверить и обновить код
+        shell: bash
+        env:
+          TIMEWEB_HOST: ${{ vars.TIMEWEB_HOST }}
+          TIMEWEB_USER: ${{ vars.TIMEWEB_USER }}
+          TIMEWEB_SSH_KEY: ${{ secrets.TIMEWEB_SSH_KEY }}
+          TIMEWEB_KNOWN_HOSTS: ${{ secrets.TIMEWEB_KNOWN_HOSTS }}
+        run: bash deploy/timeweb.sh
+
+      - name: Результат
+        shell: bash
+        run: |
+          {
+            echo '### Код отправлен на Timeweb'
+            echo 'Обновлены только api.php, index.html и три файла assets.'
+            echo 'База, ученики и вложения не входят в список передачи.'
+            echo 'Предыдущие версии изменённых файлов: courage/.code-backups/${{ github.run_id }}-${{ github.run_attempt }}'
+            echo 'Откройте сайт и проверьте вход и список заданий. Сервер может кешировать PHP.'
+          } >> "$GITHUB_STEP_SUMMARY"
