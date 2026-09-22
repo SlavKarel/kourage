@@ -1,0 +1,19 @@
+# Live user data and uploaded files must never enter Git.
+private/
+**/private/
+uploads/
+**/uploads/
+*.sqlite*
+*.db
+*.db-*
+setup-key.txt
+**/setup-key.txt
+.env
+.env.*
+*.pem
+*.key
+*.zip
+*.log
+.DS_Store
+node_modules/
+.sites-runtime/
