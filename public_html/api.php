@@ -65,6 +65,10 @@ try {
     CREATE TABLE IF NOT EXISTS attachments (id INTEGER PRIMARY KEY, task_id INTEGER NOT NULL REFERENCES tasks(id), uploader_id INTEGER NOT NULL REFERENCES users(id), kind TEXT NOT NULL CHECK(kind IN ('material','solution')), name TEXT NOT NULL, storage_name TEXT NOT NULL UNIQUE, size INTEGER NOT NULL, deleted INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now')));
     CREATE INDEX IF NOT EXISTS idx_attachments_task ON attachments(task_id,deleted);
     CREATE TABLE IF NOT EXISTS attempts (key TEXT PRIMARY KEY, count INTEGER NOT NULL, until INTEGER NOT NULL);");
+    $userColumns = array_column($db->query('PRAGMA table_info(users)')->fetchAll(),'name');
+    if (!in_array('deleted_at',$userColumns,true)) $db->exec('ALTER TABLE users ADD COLUMN deleted_at TEXT');
+    $taskColumns = array_column($db->query('PRAGMA table_info(tasks)')->fetchAll(),'name');
+    if (!in_array('deleted_at',$taskColumns,true)) $db->exec('ALTER TABLE tasks ADD COLUMN deleted_at TEXT');
     if (is_file($private.'/kourage.sqlite')) @chmod($private.'/kourage.sqlite',0600);
     $_SESSION['csrf'] ??= bin2hex(random_bytes(24));
     $action = $_GET['action'] ?? 'bootstrap';
@@ -127,7 +131,7 @@ try {
             if (!$attachment) fail('Файл не найден.',404);
         }
         $taskId = $attachment ? (int)$attachment['task_id'] : idValue($data,'task_id');
-        $task = $user['role'] === 'admin' ? run($db,'SELECT * FROM tasks WHERE id=?',[$taskId])->fetch() : run($db,'SELECT * FROM tasks WHERE id=? AND student_id=?',[$taskId,$user['id']])->fetch();
+        $task = $user['role'] === 'admin' ? run($db,'SELECT * FROM tasks WHERE id=? AND deleted_at IS NULL',[$taskId])->fetch() : run($db,'SELECT * FROM tasks WHERE id=? AND student_id=? AND deleted_at IS NULL',[$taskId,$user['id']])->fetch();
         if (!$task) fail('Файл или задание не найдено.',404);
         $directory = $private.'/uploads';
         if ($action === 'download') {
@@ -181,14 +185,14 @@ try {
     }
     if ($action === 'state') {
         if ($user['role'] === 'admin') {
-            $students = $db->query("SELECT id,name,login,role,active,created_at FROM users WHERE role='student' ORDER BY active DESC,name")->fetchAll();
-            $tasks = $db->query('SELECT tasks.*,users.name AS student_name FROM tasks JOIN users ON tasks.student_id=users.id ORDER BY tasks.updated_at DESC,tasks.id DESC')->fetchAll();
+            $students = $db->query("SELECT id,name,login,role,active,created_at FROM users WHERE role='student' AND deleted_at IS NULL ORDER BY active DESC,name")->fetchAll();
+            $tasks = $db->query('SELECT tasks.*,users.name AS student_name FROM tasks JOIN users ON tasks.student_id=users.id WHERE tasks.deleted_at IS NULL AND users.deleted_at IS NULL ORDER BY tasks.updated_at DESC,tasks.id DESC')->fetchAll();
         } else {
-            $students = []; $tasks = run($db,'SELECT tasks.*,? AS student_name FROM tasks WHERE student_id=? ORDER BY updated_at DESC,id DESC',[$user['name'],$user['id']])->fetchAll();
+            $students = []; $tasks = run($db,'SELECT tasks.*,? AS student_name FROM tasks WHERE student_id=? AND deleted_at IS NULL ORDER BY updated_at DESC,id DESC',[$user['name'],$user['id']])->fetchAll();
         }
         $files = $user['role'] === 'admin'
             ? $db->query('SELECT id,task_id,kind,name,size,created_at FROM attachments WHERE deleted=0 ORDER BY id')->fetchAll()
-            : run($db,'SELECT a.id,a.task_id,a.kind,a.name,a.size,a.created_at FROM attachments a JOIN tasks t ON t.id=a.task_id WHERE a.deleted=0 AND t.student_id=? ORDER BY a.id',[$user['id']])->fetchAll();
+            : run($db,'SELECT a.id,a.task_id,a.kind,a.name,a.size,a.created_at FROM attachments a JOIN tasks t ON t.id=a.task_id WHERE a.deleted=0 AND t.deleted_at IS NULL AND t.student_id=? ORDER BY a.id',[$user['id']])->fetchAll();
         $byTask=[]; foreach ($files as $file) $byTask[$file['task_id']][]=$file;
         foreach ($tasks as &$item) $item['attachments']=$byTask[$item['id']] ?? [];
         unset($item);
@@ -212,7 +216,7 @@ try {
     }
     if ($action === 'student_access' || $action === 'reset_password') {
         requireAdmin($user); $id = idValue($data,'id');
-        $student = run($db,"SELECT * FROM users WHERE id=? AND role='student'",[$id])->fetch();
+        $student = run($db,"SELECT * FROM users WHERE id=? AND role='student' AND deleted_at IS NULL",[$id])->fetch();
         if (!$student) fail('Ученик не найден.',404);
         if ($action === 'student_access') {
             if (!is_bool($data['active'] ?? null)) fail('Некорректный статус доступа.');
@@ -222,15 +226,27 @@ try {
         run($db,'UPDATE users SET password_hash=?,auth_version=auth_version+1 WHERE id=?',[password_hash($password,PASSWORD_DEFAULT),$id]);
         reply(['login'=>$student['login'],'name'=>$student['name'],'password'=>$password]);
     }
+    if ($action === 'delete_student') {
+        requireAdmin($user); $id = idValue($data,'id');
+        $student = run($db,"SELECT id FROM users WHERE id=? AND role='student' AND deleted_at IS NULL",[$id])->fetch();
+        if (!$student) fail('Ученик не найден.',404);
+        $db->exec('BEGIN IMMEDIATE');
+        try {
+            run($db,"UPDATE users SET active=0,auth_version=auth_version+1,deleted_at=strftime('%Y-%m-%dT%H:%M:%SZ','now') WHERE id=? AND deleted_at IS NULL",[$id]);
+            run($db,"UPDATE tasks SET deleted_at=strftime('%Y-%m-%dT%H:%M:%SZ','now'),updated_at=strftime('%Y-%m-%dT%H:%M:%SZ','now') WHERE student_id=? AND deleted_at IS NULL",[$id]);
+            $db->exec('COMMIT');
+        } catch (Throwable $error) { $db->exec('ROLLBACK'); throw $error; }
+        reply(['ok'=>true]);
+    }
     if ($action === 'save_task') {
         requireAdmin($user); $studentId = idValue($data,'student_id');
-        if (!run($db,"SELECT id FROM users WHERE id=? AND role='student'",[$studentId])->fetch()) fail('Ученик не найден.',404);
+        if (!run($db,"SELECT id FROM users WHERE id=? AND role='student' AND deleted_at IS NULL",[$studentId])->fetch()) fail('Ученик не найден.',404);
         $title = textValue($data,'title',250,true); $subject = textValue($data,'subject',100,true); $description = textValue($data,'description',20000,true);
         $resource = validLink(textValue($data,'resource_url',2000)); $due = validDate(textValue($data,'due_date',10));
         $max = filter_var($data['max_score'] ?? null,FILTER_VALIDATE_INT);
         if ($max === false || $max < 1 || $max > 1000) fail('Максимальный балл: от 1 до 1000.');
         if (!empty($data['id'])) {
-            $id = idValue($data,'id'); $task = run($db,'SELECT * FROM tasks WHERE id=?',[$id])->fetch();
+            $id = idValue($data,'id'); $task = run($db,'SELECT * FROM tasks WHERE id=? AND deleted_at IS NULL',[$id])->fetch();
             if (!$task) fail('Задание не найдено.',404);
             if ($task['student_id'] !== $studentId) fail('Нельзя перенести историю задания другому ученику. Создайте новое задание.');
             if ($task['score'] !== null && $task['score'] > $max) fail('Максимальный балл меньше уже выставленной оценки.');
@@ -240,10 +256,16 @@ try {
         }
         reply(['id'=>$id]);
     }
+    if ($action === 'delete_task') {
+        requireAdmin($user); $id = idValue($data,'id');
+        $changed = run($db,"UPDATE tasks SET deleted_at=strftime('%Y-%m-%dT%H:%M:%SZ','now'),updated_at=strftime('%Y-%m-%dT%H:%M:%SZ','now') WHERE id=? AND deleted_at IS NULL",[$id]);
+        if (!$changed->rowCount()) fail('Задание не найдено.',404);
+        reply(['ok'=>true]);
+    }
     if ($action === 'submit' || $action === 'review') {
         $id=idValue($data,'id');
         // Scope the SQL query itself, not just the UI, to the signed-in student.
-        $task = $user['role'] === 'admin' ? run($db,'SELECT * FROM tasks WHERE id=?',[$id])->fetch() : run($db,'SELECT * FROM tasks WHERE id=? AND student_id=?',[$id,$user['id']])->fetch();
+        $task = $user['role'] === 'admin' ? run($db,'SELECT * FROM tasks WHERE id=? AND deleted_at IS NULL',[$id])->fetch() : run($db,'SELECT * FROM tasks WHERE id=? AND student_id=? AND deleted_at IS NULL',[$id,$user['id']])->fetch();
         if (!$task) fail('Задание не найдено.',404);
         if ($action === 'submit') {
             if ($user['role'] !== 'student') fail('Решение отправляет ученик.',403);
