@@ -1,0 +1,271 @@
+<?php
+declare(strict_types=1);
+// PHP 8.1+; PDO SQLite. Keep ../private OUTSIDE the public directory.
+ini_set('display_errors', '0');
+header('Content-Type: application/json; charset=utf-8');
+header('Cache-Control: no-store');
+header('X-Content-Type-Options: nosniff');
+header('X-Frame-Options: DENY');
+header('Referrer-Policy: same-origin');
+$secure = !empty($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off';
+session_name('kourage_session');
+session_set_cookie_params(['lifetime'=>0,'path'=>'/','secure'=>$secure,'httponly'=>true,'samesite'=>'Lax']);
+ini_set('session.use_strict_mode', '1');
+session_start();
+
+function reply(array $data, int $status = 200): never {
+    http_response_code($status);
+    echo json_encode($data, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+    exit;
+}
+function fail(string $message, int $status = 400): never { reply(['error'=>$message], $status); }
+function textValue(array $data, string $key, int $max, bool $required = false): string {
+    $value = $data[$key] ?? '';
+    if (!is_string($value)) fail('Некорректное поле: '.$key);
+    $value = trim($value);
+    if (($required && $value === '') || strlen($value) > $max) fail('Проверьте заполнение поля: '.$key);
+    return $value;
+}
+function passwordValue(array $data, string $key = 'password'): string {
+    $value = $data[$key] ?? null;
+    if (!is_string($value) || strlen($value) < 6 || strlen($value) > 72) fail('Пароль должен содержать от 6 до 72 байт (для латиницы — символов).');
+    return $value;
+}
+function run(PDO $db, string $sql, array $params = []): PDOStatement {
+    $stmt = $db->prepare($sql); $stmt->execute($params); return $stmt;
+}
+function publicUser(array $user): array {
+    return array_intersect_key($user, array_flip(['id','name','login','role','active','created_at']));
+}
+function requireAdmin(array $user): void { if ($user['role'] !== 'admin') fail('Доступ только для преподавателя.',403); }
+function validLink(string $url): string {
+    if ($url !== '' && (!filter_var($url, FILTER_VALIDATE_URL) || !in_array(strtolower((string)parse_url($url,PHP_URL_SCHEME)), ['http','https'],true))) fail('Укажите ссылку, начинающуюся с https:// или http://.');
+    return $url;
+}
+function validDate(string $date): string {
+    if ($date === '') return '';
+    $d = DateTimeImmutable::createFromFormat('!Y-m-d', $date);
+    if (!$d || $d->format('Y-m-d') !== $date) fail('Некорректная дата.');
+    return $date;
+}
+function idValue(array $data, string $key): int {
+    $id = filter_var($data[$key] ?? null,FILTER_VALIDATE_INT);
+    if ($id === false || $id < 1) fail('Некорректный идентификатор.');
+    return $id;
+}
+
+try {
+    $private = dirname(__DIR__).'/private';
+    if (!is_dir($private) || !is_writable($private)) fail('Не найдена доступная для записи папка private. Проверьте установку по инструкции.',503);
+    $db = new PDO('sqlite:'.$private.'/kourage.sqlite', null, null, [PDO::ATTR_ERRMODE=>PDO::ERRMODE_EXCEPTION,PDO::ATTR_DEFAULT_FETCH_MODE=>PDO::FETCH_ASSOC]);
+    $db->exec('PRAGMA foreign_keys=ON; PRAGMA busy_timeout=5000;');
+    $db->exec("CREATE TABLE IF NOT EXISTS users (id INTEGER PRIMARY KEY, name TEXT NOT NULL, login TEXT NOT NULL UNIQUE COLLATE NOCASE, password_hash TEXT NOT NULL, role TEXT NOT NULL CHECK(role IN ('admin','student')), active INTEGER NOT NULL DEFAULT 1, auth_version INTEGER NOT NULL DEFAULT 1, created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now')));
+    CREATE TABLE IF NOT EXISTS tasks (id INTEGER PRIMARY KEY, student_id INTEGER NOT NULL REFERENCES users(id), title TEXT NOT NULL, subject TEXT NOT NULL, description TEXT NOT NULL, resource_url TEXT NOT NULL DEFAULT '', due_date TEXT NOT NULL DEFAULT '', status TEXT NOT NULL DEFAULT 'assigned' CHECK(status IN ('assigned','submitted','revision','done')), solution TEXT NOT NULL DEFAULT '', solution_url TEXT NOT NULL DEFAULT '', feedback TEXT NOT NULL DEFAULT '', score INTEGER, max_score INTEGER NOT NULL DEFAULT 10, submitted_at TEXT, completed_at TEXT, created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now')), updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now')));
+    CREATE INDEX IF NOT EXISTS idx_tasks_student_updated ON tasks(student_id, updated_at DESC);
+    CREATE TABLE IF NOT EXISTS attachments (id INTEGER PRIMARY KEY, task_id INTEGER NOT NULL REFERENCES tasks(id), uploader_id INTEGER NOT NULL REFERENCES users(id), kind TEXT NOT NULL CHECK(kind IN ('material','solution')), name TEXT NOT NULL, storage_name TEXT NOT NULL UNIQUE, size INTEGER NOT NULL, deleted INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now')));
+    CREATE INDEX IF NOT EXISTS idx_attachments_task ON attachments(task_id,deleted);
+    CREATE TABLE IF NOT EXISTS attempts (key TEXT PRIMARY KEY, count INTEGER NOT NULL, until INTEGER NOT NULL);");
+    if (is_file($private.'/kourage.sqlite')) @chmod($private.'/kourage.sqlite',0600);
+    $_SESSION['csrf'] ??= bin2hex(random_bytes(24));
+    $action = $_GET['action'] ?? 'bootstrap';
+    $method = $_SERVER['REQUEST_METHOD'];
+    $data = [];
+    if ($method === 'POST') {
+        if ((int)($_SERVER['CONTENT_LENGTH'] ?? 0) > ($action === 'upload' ? 11*1024*1024 : 100000)) fail('Слишком большой запрос.',413);
+        if (!hash_equals($_SESSION['csrf'],$_SERVER['HTTP_X_CSRF_TOKEN'] ?? '')) fail('Обновите страницу и повторите действие.',403);
+        if ($action === 'upload') { $data = $_POST; } else {
+        $raw = file_get_contents('php://input',false,null,0,100001);
+        if (strlen($raw) > 100000) fail('Слишком большой запрос.',413);
+        $data = json_decode($raw,true);
+        if (!is_array($data)) fail('Некорректный запрос.');
+        }
+    } elseif ($method !== 'GET') fail('Метод не поддерживается.',405);
+    $installed = (int)$db->query("SELECT COUNT(*) FROM users WHERE role='admin'")->fetchColumn() > 0;
+    $user = isset($_SESSION['uid']) ? run($db,'SELECT * FROM users WHERE id=?',[$_SESSION['uid']])->fetch() : false;
+    if ($user && (!$user['active'] || $user['auth_version'] !== ($_SESSION['auth_version'] ?? null) || time() - ($_SESSION['last_seen'] ?? 0) > 43200)) {
+        unset($_SESSION['uid'],$_SESSION['auth_version']); $user = false;
+    }
+    if ($user) $_SESSION['last_seen'] = time();
+    if ($action === 'bootstrap' && $method === 'GET') reply(['installed'=>$installed,'user'=>$user ? publicUser($user) : null,'csrf'=>$_SESSION['csrf']]);
+    if ($method !== 'POST' && !in_array($action,['state','download'],true)) fail('Используйте POST.',405);
+    if ($action === 'login' || $action === 'setup') {
+        $ipKey = hash('sha256',$action.':'.($_SERVER['REMOTE_ADDR'] ?? 'local'));
+        $attempt = run($db,'SELECT * FROM attempts WHERE key=?',[$ipKey])->fetch();
+        if ($attempt && $attempt['until'] > time() && $attempt['count'] >= 10) fail('Слишком много попыток. Повторите через 15 минут.',429);
+        run($db,'DELETE FROM attempts WHERE until < ?', [time()]);
+        run($db,'INSERT INTO attempts(key,count,until) VALUES(?,1,?) ON CONFLICT(key) DO UPDATE SET count=count+1',[$ipKey,time()+900]);
+        $login = strtolower(textValue($data,'login',64,true));
+        if (!preg_match('/^[a-z0-9._-]{3,64}$/D',$login)) fail('Логин: 3–64 латинских буквы, цифры, точки, дефисы или подчёркивания.');
+        if ($action === 'setup') {
+            if ($installed) fail('Первичная настройка уже выполнена.',409);
+            $keyPath = $private.'/setup-key.txt';
+            $key = is_file($keyPath) ? trim((string)file_get_contents($keyPath)) : '';
+            if (strlen($key) < 24 || !hash_equals($key,textValue($data,'setup_key',200,true))) fail('Неверный ключ установки.',403);
+            $name = textValue($data,'name',160,true);
+            $hash = password_hash(passwordValue($data),PASSWORD_DEFAULT);
+            $db->exec('BEGIN IMMEDIATE');
+            if ($db->query("SELECT COUNT(*) FROM users WHERE role='admin'")->fetchColumn() > 0) { $db->exec('ROLLBACK'); fail('Настройка уже завершена.',409); }
+            run($db,"INSERT INTO users(name,login,password_hash,role) VALUES(?,?,?,'admin')",[$name,$login,$hash]);
+            $db->exec('COMMIT');
+            @unlink($keyPath);
+        }
+        $user = run($db,'SELECT * FROM users WHERE login=?',[$login])->fetch();
+        $password = $data['password'] ?? '';
+        $ok = is_string($password) && strlen($password) <= 72 && password_verify($password,$user['password_hash'] ?? '$2y$10$92IXUNpkjO0rOQ5byMi.Ye4oKoEa3Ro9llC/.og/at2uheWG/igi.');
+        if (!$user || !$ok || !$user['active']) fail('Неверный логин или пароль.',401);
+        run($db,'DELETE FROM attempts WHERE key=?',[$ipKey]);
+        session_regenerate_id(true);
+        $_SESSION['uid'] = $user['id']; $_SESSION['auth_version'] = $user['auth_version']; $_SESSION['last_seen'] = time();
+        $_SESSION['csrf'] = bin2hex(random_bytes(24));
+        reply(['user'=>publicUser($user),'csrf'=>$_SESSION['csrf']]);
+    }
+    if (!$user) fail('Войдите в свой кабинет.',401);
+    if (in_array($action,['upload','download','remove_attachment'],true)) {
+        $attachment = null;
+        if ($action !== 'upload') {
+            $attachment = run($db,'SELECT * FROM attachments WHERE id=? AND deleted=0',[idValue($action === 'download' ? $_GET : $data,'id')])->fetch();
+            if (!$attachment) fail('Файл не найден.',404);
+        }
+        $taskId = $attachment ? (int)$attachment['task_id'] : idValue($data,'task_id');
+        $task = $user['role'] === 'admin' ? run($db,'SELECT * FROM tasks WHERE id=?',[$taskId])->fetch() : run($db,'SELECT * FROM tasks WHERE id=? AND student_id=?',[$taskId,$user['id']])->fetch();
+        if (!$task) fail('Файл или задание не найдено.',404);
+        $directory = $private.'/uploads';
+        if ($action === 'download') {
+            $path = $directory.'/'.$attachment['storage_name'];
+            if (!is_file($path)) fail('Файл отсутствует на сервере. Обратитесь к преподавателю.',404);
+            header('Content-Type: application/octet-stream');
+            header("Content-Disposition: attachment; filename=download; filename*=UTF-8''".rawurlencode($attachment['name']));
+            header('Content-Length: '.filesize($path));
+            header('Content-Security-Policy: sandbox');
+            session_write_close(); readfile($path); exit;
+        }
+        $kind = $attachment ? $attachment['kind'] : textValue($data,'kind',20,true);
+        if (!in_array($kind,['material','solution'],true)) fail('Некорректный тип файла.');
+        if ($kind === 'material') requireAdmin($user);
+        else if ($user['role'] !== 'student' || !in_array($task['status'],['assigned','revision'],true)) fail('Изменять файлы решения можно до отправки или при доработке.',403);
+        if ($action === 'remove_attachment') {
+            $changed = $kind === 'solution'
+                ? run($db,"UPDATE attachments SET deleted=1 WHERE id=? AND EXISTS (SELECT 1 FROM tasks WHERE id=? AND status IN ('assigned','revision'))",[$attachment['id'],$taskId])
+                : run($db,'UPDATE attachments SET deleted=1 WHERE id=?',[$attachment['id']]);
+            if (!$changed->rowCount()) fail('Работа уже отправлена. Обновите страницу.',409);
+            reply(['ok'=>true]);
+        }
+        $file = $_FILES['file'] ?? null;
+        if (!$file || !is_array($file) || is_array($file['error'] ?? null)) fail('Выберите файл. Если файл выбран, проверьте лимиты загрузки PHP на хостинге.',413);
+        if (($file['error'] ?? UPLOAD_ERR_NO_FILE) !== UPLOAD_ERR_OK) fail('Файл не загружен. Проверьте размер файла и лимиты upload_max_filesize и post_max_size на хостинге.',413);
+        $name = basename(str_replace('\\','/',(string)$file['name']));
+        if ($name === '' || strlen($name)>240 || preg_match('/[\x00-\x1F\x7F]/',$name) || !preg_match('//u',$name)) fail('Слишком длинное или некорректное имя файла.');
+        $ext = strtolower(pathinfo($name,PATHINFO_EXTENSION));
+        if (!in_array($ext,['xlsx','xls','csv','txt'],true)) fail('Поддерживаются только XLSX, XLS, CSV и TXT.');
+        $size = filesize($file['tmp_name']);
+        if ($size === false || $size > 10*1024*1024) fail('Максимальный размер файла — 10 МБ.',413);
+        if (!is_dir($directory) && !mkdir($directory,0700,true)) fail('Не удалось создать папку для файлов.',503);
+        $storage = bin2hex(random_bytes(24)).'.bin'; $path = $directory.'/'.$storage;
+        $db->exec('BEGIN IMMEDIATE');
+        try {
+            if ((int)run($db,'SELECT COUNT(*) FROM attachments WHERE task_id=? AND kind=? AND deleted=0',[$taskId,$kind])->fetchColumn() >= 20) {
+                $db->exec('ROLLBACK'); fail('Не более 20 файлов одного типа на задание. Уберите лишние вложения.');
+            }
+            // Recheck after locking: a review can arrive while the upload is in progress.
+            $current = run($db,'SELECT status FROM tasks WHERE id=?',[$taskId])->fetchColumn();
+            if ($kind === 'solution' && !in_array($current,['assigned','revision'],true)) { $db->exec('ROLLBACK'); fail('Работа уже отправлена. Обновите страницу.',409); }
+            if (!move_uploaded_file($file['tmp_name'],$path)) throw new RuntimeException('Cannot move uploaded file');
+            chmod($path,0600);
+            run($db,'INSERT INTO attachments(task_id,uploader_id,kind,name,storage_name,size) VALUES(?,?,?,?,?,?)',[$taskId,$user['id'],$kind,$name,$storage,$size]);
+            $id=(int)$db->lastInsertId(); $db->exec('COMMIT');
+        } catch (Throwable $error) { $db->exec('ROLLBACK'); if (is_file($path)) unlink($path); throw $error; }
+        reply(['id'=>$id,'name'=>$name,'size'=>$size],201);
+    }
+    if ($action === 'logout') {
+        $_SESSION=[]; session_destroy(); setcookie(session_name(),'', ['expires'=>time()-3600,'path'=>'/','secure'=>$secure,'httponly'=>true,'samesite'=>'Lax']); reply(['ok'=>true]);
+    }
+    if ($action === 'state') {
+        if ($user['role'] === 'admin') {
+            $students = $db->query("SELECT id,name,login,role,active,created_at FROM users WHERE role='student' ORDER BY active DESC,name")->fetchAll();
+            $tasks = $db->query('SELECT tasks.*,users.name AS student_name FROM tasks JOIN users ON tasks.student_id=users.id ORDER BY tasks.updated_at DESC,tasks.id DESC')->fetchAll();
+        } else {
+            $students = []; $tasks = run($db,'SELECT tasks.*,? AS student_name FROM tasks WHERE student_id=? ORDER BY updated_at DESC,id DESC',[$user['name'],$user['id']])->fetchAll();
+        }
+        $files = $user['role'] === 'admin'
+            ? $db->query('SELECT id,task_id,kind,name,size,created_at FROM attachments WHERE deleted=0 ORDER BY id')->fetchAll()
+            : run($db,'SELECT a.id,a.task_id,a.kind,a.name,a.size,a.created_at FROM attachments a JOIN tasks t ON t.id=a.task_id WHERE a.deleted=0 AND t.student_id=? ORDER BY a.id',[$user['id']])->fetchAll();
+        $byTask=[]; foreach ($files as $file) $byTask[$file['task_id']][]=$file;
+        foreach ($tasks as &$item) $item['attachments']=$byTask[$item['id']] ?? [];
+        unset($item);
+        reply(['user'=>publicUser($user),'students'=>$students,'tasks'=>$tasks]);
+    }
+    if ($action === 'change_password') {
+        $old = textValue($data,'old_password',72,true);
+        if (!password_verify($old,$user['password_hash'])) fail('Текущий пароль неверный.');
+        $new = passwordValue($data);
+        run($db,'UPDATE users SET password_hash=?,auth_version=auth_version+1 WHERE id=?',[password_hash($new,PASSWORD_DEFAULT),$user['id']]);
+        $_SESSION['auth_version']++; session_regenerate_id(true); reply(['ok'=>true]);
+    }
+    if ($action === 'create_student') {
+        requireAdmin($user);
+        $name = textValue($data,'name',160,true); $login = strtolower(textValue($data,'login',64,true));
+        if (!preg_match('/^[a-z0-9._-]{3,64}$/D',$login)) fail('Логин: 3–64 латинских буквы, цифры, точки, дефисы или подчёркивания.');
+        if (run($db,'SELECT id FROM users WHERE login=?',[$login])->fetch()) fail('Этот логин уже занят.');
+        $password = bin2hex(random_bytes(8));
+        run($db,"INSERT INTO users(name,login,password_hash,role) VALUES(?,?,?,'student')",[$name,$login,password_hash($password,PASSWORD_DEFAULT)]);
+        reply(['id'=>(int)$db->lastInsertId(),'name'=>$name,'login'=>$login,'password'=>$password],201);
+    }
+    if ($action === 'student_access' || $action === 'reset_password') {
+        requireAdmin($user); $id = idValue($data,'id');
+        $student = run($db,"SELECT * FROM users WHERE id=? AND role='student'",[$id])->fetch();
+        if (!$student) fail('Ученик не найден.',404);
+        if ($action === 'student_access') {
+            if (!is_bool($data['active'] ?? null)) fail('Некорректный статус доступа.');
+            run($db,'UPDATE users SET active=?,auth_version=auth_version+1 WHERE id=?',[(int)$data['active'],$id]); reply(['ok'=>true]);
+        }
+        $password = bin2hex(random_bytes(8));
+        run($db,'UPDATE users SET password_hash=?,auth_version=auth_version+1 WHERE id=?',[password_hash($password,PASSWORD_DEFAULT),$id]);
+        reply(['login'=>$student['login'],'name'=>$student['name'],'password'=>$password]);
+    }
+    if ($action === 'save_task') {
+        requireAdmin($user); $studentId = idValue($data,'student_id');
+        if (!run($db,"SELECT id FROM users WHERE id=? AND role='student'",[$studentId])->fetch()) fail('Ученик не найден.',404);
+        $title = textValue($data,'title',250,true); $subject = textValue($data,'subject',100,true); $description = textValue($data,'description',20000,true);
+        $resource = validLink(textValue($data,'resource_url',2000)); $due = validDate(textValue($data,'due_date',10));
+        $max = filter_var($data['max_score'] ?? null,FILTER_VALIDATE_INT);
+        if ($max === false || $max < 1 || $max > 1000) fail('Максимальный балл: от 1 до 1000.');
+        if (!empty($data['id'])) {
+            $id = idValue($data,'id'); $task = run($db,'SELECT * FROM tasks WHERE id=?',[$id])->fetch();
+            if (!$task) fail('Задание не найдено.',404);
+            if ($task['student_id'] !== $studentId) fail('Нельзя перенести историю задания другому ученику. Создайте новое задание.');
+            if ($task['score'] !== null && $task['score'] > $max) fail('Максимальный балл меньше уже выставленной оценки.');
+            run($db,"UPDATE tasks SET title=?,subject=?,description=?,resource_url=?,due_date=?,max_score=?,updated_at=strftime('%Y-%m-%dT%H:%M:%SZ','now') WHERE id=?",[$title,$subject,$description,$resource,$due,$max,$id]);
+        } else {
+            run($db,'INSERT INTO tasks(student_id,title,subject,description,resource_url,due_date,max_score) VALUES(?,?,?,?,?,?,?)',[$studentId,$title,$subject,$description,$resource,$due,$max]); $id=(int)$db->lastInsertId();
+        }
+        reply(['id'=>$id]);
+    }
+    if ($action === 'submit' || $action === 'review') {
+        $id=idValue($data,'id');
+        // Scope the SQL query itself, not just the UI, to the signed-in student.
+        $task = $user['role'] === 'admin' ? run($db,'SELECT * FROM tasks WHERE id=?',[$id])->fetch() : run($db,'SELECT * FROM tasks WHERE id=? AND student_id=?',[$id,$user['id']])->fetch();
+        if (!$task) fail('Задание не найдено.',404);
+        if ($action === 'submit') {
+            if ($user['role'] !== 'student') fail('Решение отправляет ученик.',403);
+            if (!in_array($task['status'],['assigned','revision'],true)) fail('Эта работа уже отправлена. Для исправления преподаватель должен вернуть её на доработку.',409);
+            $solution=textValue($data,'solution',30000); $url=validLink(textValue($data,'solution_url',2000));
+            if ($solution === '' && $url === '' && !run($db,"SELECT id FROM attachments WHERE task_id=? AND kind='solution' AND deleted=0 LIMIT 1",[$id])->fetch()) fail('Добавьте решение: текст, ссылку или файл.');
+            run($db,"UPDATE tasks SET solution=?,solution_url=?,status='submitted',submitted_at=strftime('%Y-%m-%dT%H:%M:%SZ','now'),completed_at=NULL,score=NULL,updated_at=strftime('%Y-%m-%dT%H:%M:%SZ','now') WHERE id=?",[$solution,$url,$id]);
+        } else {
+            requireAdmin($user); $status=textValue($data,'status',20,true);
+            if (!in_array($status,['done','revision'],true)) fail('Некорректный статус проверки.');
+            $feedback=textValue($data,'feedback',20000);
+            if ($status === 'revision' && $feedback === '') fail('Напишите, что нужно исправить.');
+            $score=$data['score'] ?? null;
+            if ($score === '') $score=null;
+            if ($score !== null && (filter_var($score,FILTER_VALIDATE_INT) === false || (int)$score < 0 || (int)$score > $task['max_score'])) fail('Балл должен быть от 0 до '.$task['max_score'].'.');
+            if ($status === 'revision') $score=null;
+            run($db,"UPDATE tasks SET status=?,feedback=?,score=?,completed_at=?,updated_at=strftime('%Y-%m-%dT%H:%M:%SZ','now') WHERE id=?",[$status,$feedback,$score,$status==='done'?gmdate('Y-m-d\TH:i:s\Z'):null,$id]);
+        }
+        reply(['ok'=>true]);
+    }
+    fail('Действие не найдено.',404);
+} catch (Throwable $error) {
+    error_log('Kourage: '.$error->getMessage());
+    fail('Не удалось выполнить запрос. Попробуйте ещё раз. Если ошибка повторяется, проверьте журнал ошибок хостинга.',500);
+}
