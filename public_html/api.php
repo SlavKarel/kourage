@@ -8,6 +8,8 @@ header('X-Content-Type-Options: nosniff');
 header('X-Frame-Options: DENY');
 header('Referrer-Policy: same-origin');
 $secure = !empty($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off';
+$rememberCookie = 'kourage_remember';
+$rememberLifetime = 180 * 24 * 60 * 60;
 session_name('kourage_session');
 session_set_cookie_params(['lifetime'=>0,'path'=>'/','secure'=>$secure,'httponly'=>true,'samesite'=>'Lax']);
 ini_set('session.use_strict_mode', '1');
@@ -53,6 +55,42 @@ function idValue(array $data, string $key): int {
     if ($id === false || $id < 1) fail('Некорректный идентификатор.');
     return $id;
 }
+function clearRemember(PDO $db, string $cookieName, bool $secure): void {
+    $value = $_COOKIE[$cookieName] ?? '';
+    if (is_string($value) && preg_match('/^([a-f0-9]{32})\.([a-f0-9]{64})$/D',$value,$parts)) {
+        run($db,'DELETE FROM remember_tokens WHERE selector=?',[$parts[1]]);
+    }
+    setcookie($cookieName,'',['expires'=>time()-3600,'path'=>'/','secure'=>$secure,'httponly'=>true,'samesite'=>'Lax']);
+    unset($_COOKIE[$cookieName]);
+}
+function issueRemember(PDO $db, array $user, string $cookieName, int $lifetime, bool $secure): void {
+    $selector = bin2hex(random_bytes(16));
+    $validator = bin2hex(random_bytes(32));
+    $expires = time() + $lifetime;
+    run($db,'INSERT INTO remember_tokens(selector,user_id,token_hash,auth_version,expires_at) VALUES(?,?,?,?,?)',[
+        $selector,$user['id'],hash('sha256',$validator),(int)$user['auth_version'],$expires
+    ]);
+    setcookie($cookieName,$selector.'.'.$validator,['expires'=>$expires,'path'=>'/','secure'=>$secure,'httponly'=>true,'samesite'=>'Lax']);
+}
+function restoreRemember(PDO $db, string $cookieName, bool $secure): array|false {
+    $value = $_COOKIE[$cookieName] ?? '';
+    if (!is_string($value) || !preg_match('/^([a-f0-9]{32})\.([a-f0-9]{64})$/D',$value,$parts)) {
+        if ($value !== '') clearRemember($db,$cookieName,$secure);
+        return false;
+    }
+    $row = run($db,'SELECT r.token_hash,r.auth_version AS remembered_version,r.expires_at,u.* FROM remember_tokens r JOIN users u ON u.id=r.user_id WHERE r.selector=?',[$parts[1]])->fetch();
+    if (!$row || (int)$row['expires_at'] < time() || !(int)$row['active'] || $row['deleted_at'] !== null || (int)$row['remembered_version'] !== (int)$row['auth_version'] || !hash_equals($row['token_hash'],hash('sha256',$parts[2]))) {
+        clearRemember($db,$cookieName,$secure);
+        return false;
+    }
+    run($db,'UPDATE remember_tokens SET last_used_at=? WHERE selector=?',[time(),$parts[1]]);
+    session_regenerate_id(true);
+    $_SESSION['uid'] = $row['id'];
+    $_SESSION['auth_version'] = (int)$row['auth_version'];
+    $_SESSION['last_seen'] = time();
+    $_SESSION['csrf'] = bin2hex(random_bytes(24));
+    return $row;
+}
 
 try {
     $private = dirname(__DIR__).'/private';
@@ -66,6 +104,8 @@ try {
     CREATE INDEX IF NOT EXISTS idx_attachments_task ON attachments(task_id,deleted);
     CREATE TABLE IF NOT EXISTS classwork_files (id INTEGER PRIMARY KEY, student_id INTEGER NOT NULL REFERENCES users(id), uploader_id INTEGER NOT NULL REFERENCES users(id), name TEXT NOT NULL, relative_path TEXT NOT NULL, storage_name TEXT NOT NULL UNIQUE, size INTEGER NOT NULL, deleted INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now')));
     CREATE INDEX IF NOT EXISTS idx_classwork_student ON classwork_files(student_id,deleted,relative_path);
+    CREATE TABLE IF NOT EXISTS remember_tokens (selector TEXT PRIMARY KEY, user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE, token_hash TEXT NOT NULL, auth_version INTEGER NOT NULL, expires_at INTEGER NOT NULL, last_used_at INTEGER NOT NULL DEFAULT (strftime('%s','now')));
+    CREATE INDEX IF NOT EXISTS idx_remember_user ON remember_tokens(user_id);
     CREATE TABLE IF NOT EXISTS attempts (key TEXT PRIMARY KEY, count INTEGER NOT NULL, until INTEGER NOT NULL);");
     $userColumns = array_column($db->query('PRAGMA table_info(users)')->fetchAll(),'name');
     if (!in_array('deleted_at',$userColumns,true)) $db->exec('ALTER TABLE users ADD COLUMN deleted_at TEXT');
@@ -77,6 +117,7 @@ try {
     if(!in_array('relative_path',$attachmentColumns,true))$db->exec('ALTER TABLE attachments ADD COLUMN relative_path TEXT');
     $db->exec("UPDATE attachments SET relative_path=name WHERE relative_path IS NULL OR relative_path=''");
     if (is_file($private.'/kourage.sqlite')) @chmod($private.'/kourage.sqlite',0600);
+    run($db,'DELETE FROM remember_tokens WHERE expires_at < ?',[time()]);
     $_SESSION['csrf'] ??= bin2hex(random_bytes(24));
     $action = $_GET['action'] ?? 'bootstrap';
     $method = $_SERVER['REQUEST_METHOD'];
@@ -93,13 +134,16 @@ try {
     } elseif ($method !== 'GET') fail('Метод не поддерживается.',405);
     $installed = (int)$db->query("SELECT COUNT(*) FROM users WHERE role='admin'")->fetchColumn() > 0;
     $user = isset($_SESSION['uid']) ? run($db,'SELECT * FROM users WHERE id=?',[$_SESSION['uid']])->fetch() : false;
-    if ($user && (!$user['active'] || $user['auth_version'] !== ($_SESSION['auth_version'] ?? null) || time() - ($_SESSION['last_seen'] ?? 0) > 43200)) {
+    if ($user && (!(int)$user['active'] || (int)$user['auth_version'] !== (int)($_SESSION['auth_version'] ?? -1) || time() - (int)($_SESSION['last_seen'] ?? 0) > 43200)) {
         unset($_SESSION['uid'],$_SESSION['auth_version']); $user = false;
     }
+    if (!$user) $user = restoreRemember($db,$rememberCookie,$secure);
     if ($user) $_SESSION['last_seen'] = time();
     if ($action === 'bootstrap' && $method === 'GET') reply(['installed'=>$installed,'user'=>$user ? publicUser($user) : null,'csrf'=>$_SESSION['csrf']]);
     if ($method !== 'POST' && !in_array($action,['state','download','preview','classwork_state','classwork_download','classwork_preview'],true)) fail('Используйте POST.',405);
     if ($action === 'login' || $action === 'setup') {
+        $remember = $data['remember'] ?? false;
+        if (!is_bool($remember)) fail('Некорректная настройка запоминания входа.');
         $ipKey = hash('sha256',$action.':'.($_SERVER['REMOTE_ADDR'] ?? 'local'));
         $attempt = run($db,'SELECT * FROM attempts WHERE key=?',[$ipKey])->fetch();
         if ($attempt && $attempt['until'] > time() && $attempt['count'] >= 10) fail('Слишком много попыток. Повторите через 15 минут.',429);
@@ -128,6 +172,8 @@ try {
         session_regenerate_id(true);
         $_SESSION['uid'] = $user['id']; $_SESSION['auth_version'] = $user['auth_version']; $_SESSION['last_seen'] = time();
         $_SESSION['csrf'] = bin2hex(random_bytes(24));
+        clearRemember($db,$rememberCookie,$secure);
+        if ($remember) issueRemember($db,$user,$rememberCookie,$rememberLifetime,$secure);
         reply(['user'=>publicUser($user),'csrf'=>$_SESSION['csrf']]);
     }
     if (!$user) fail('Войдите в свой кабинет.',401);
@@ -251,6 +297,7 @@ try {
         fail('Неизвестное действие.',404);
     }
     if ($action === 'logout') {
+        clearRemember($db,$rememberCookie,$secure);
         $_SESSION=[]; session_destroy(); setcookie(session_name(),'', ['expires'=>time()-3600,'path'=>'/','secure'=>$secure,'httponly'=>true,'samesite'=>'Lax']); reply(['ok'=>true]);
     }
     if ($action === 'state') {
@@ -273,6 +320,8 @@ try {
         if (!password_verify($old,$user['password_hash'])) fail('Текущий пароль неверный.');
         $new = passwordValue($data);
         run($db,'UPDATE users SET password_hash=?,auth_version=auth_version+1 WHERE id=?',[password_hash($new,PASSWORD_DEFAULT),$user['id']]);
+        run($db,'DELETE FROM remember_tokens WHERE user_id=?',[$user['id']]);
+        setcookie($rememberCookie,'',['expires'=>time()-3600,'path'=>'/','secure'=>$secure,'httponly'=>true,'samesite'=>'Lax']);
         $_SESSION['auth_version']++; session_regenerate_id(true); reply(['ok'=>true]);
     }
     if ($action === 'create_student') {
