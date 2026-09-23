@@ -1,0 +1,35 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "Kourage: опубликовать классную работу",
+      "type": "process",
+      "command": "node",
+      "args": [
+        "${workspaceFolder}/tools/publish-classwork.mjs",
+        "https://co916506.tw1.ru",
+        "${input:studentLogin}",
+        "${input:classworkFolder}"
+      ],
+      "problemMatcher": [],
+      "presentation": {
+        "reveal": "always",
+        "panel": "dedicated",
+        "clear": true
+      }
+    }
+  ],
+  "inputs": [
+    {
+      "id": "studentLogin",
+      "type": "promptString",
+      "description": "Логин ученика в Kourage"
+    },
+    {
+      "id": "classworkFolder",
+      "type": "promptString",
+      "description": "Путь к локальной папке ученика",
+      "default": "./students/Artem"
+    }
+  ]
+}
