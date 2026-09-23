@@ -9,7 +9,7 @@ const demoContents={901:'n = int(input())\n\ntotal = 0\nfor value in range(1, n 
 const esc=value=>String(value??'').replace(/[&<>"']/g,char=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[char]));
 const previewable=new Set(['','txt','csv','md','py','js','ts','jsx','tsx','html','css','json','xml','yaml','yml','sql','java','c','cpp','h','hpp','cs','go','rs','php','sh','ini','toml']);
 const accepted=[...previewable,'xlsx','xls'];
-const extension=name=>(String(name).split('.').pop()||'').toLowerCase();
+const extension=name=>String(name).includes('.')?(String(name).split('.').pop()||'').toLowerCase():'';
 const icon=name=>`<svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${name==='book'?'<path d="M4 4h6a3 3 0 0 1 3 3v14a4 4 0 0 0-4-2H4z"/><path d="M13 7a3 3 0 0 1 3-3h5v15h-4a4 4 0 0 0-4 2"/>':name==='grid'?'<rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/>':name==='check'?'<path d="m5 12 4 4L19 6"/>':'<path d="M9 4H4v16h5m5-12 4 4-4 4M8 12h12"/>'}</svg>`;
 const brand='<div class="brand"><img src="assets/favicon.svg" alt="">kourage<span style="color:#2457e8">.</span></div>';
 const initials=name=>name.split(/\s+/).slice(0,2).map(part=>part[0]).join('').toUpperCase();
