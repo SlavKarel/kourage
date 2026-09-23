@@ -1,5 +1,7 @@
 api.php
 assets/app.js
+assets/classwork.js
 assets/favicon.svg
 assets/style.css
+classwork.html
 index.html
