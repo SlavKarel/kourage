@@ -203,7 +203,7 @@ try {
         reply(['id'=>$id,'name'=>$name,'path'=>$relative,'size'=>$size],201);
     }
     if (str_starts_with($action,'classwork_')) {
-        $previewable=['txt','csv','md','py','js','ts','jsx','tsx','html','css','json','xml','yaml','yml','sql','java','c','cpp','h','hpp','cs','go','rs','php','sh','ini','toml'];
+        $previewable=['','txt','csv','md','py','js','ts','jsx','tsx','html','css','json','xml','yaml','yml','sql','java','c','cpp','h','hpp','cs','go','rs','php','sh','ini','toml'];
         $allowed=array_merge($previewable,['xlsx','xls']);
         if($action==='classwork_state'){
             if($user['role']==='admin'){
