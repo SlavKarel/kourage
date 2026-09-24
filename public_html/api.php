@@ -112,6 +112,8 @@ try {
     CREATE INDEX IF NOT EXISTS idx_remember_user ON remember_tokens(user_id);
     CREATE TABLE IF NOT EXISTS question_bank (id INTEGER PRIMARY KEY, teacher_id INTEGER NOT NULL REFERENCES users(id), title TEXT NOT NULL, subject TEXT NOT NULL, topic TEXT NOT NULL DEFAULT '', difficulty TEXT NOT NULL DEFAULT 'medium' CHECK(difficulty IN ('easy','medium','hard')), prompt TEXT NOT NULL, correct_answer TEXT NOT NULL, explanation TEXT NOT NULL DEFAULT '', default_score INTEGER NOT NULL DEFAULT 1, created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now')), updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now')), deleted_at TEXT);
     CREATE INDEX IF NOT EXISTS idx_question_bank_teacher ON question_bank(teacher_id,deleted_at,updated_at DESC);
+    CREATE TABLE IF NOT EXISTS question_bank_files (id INTEGER PRIMARY KEY, bank_item_id INTEGER NOT NULL REFERENCES question_bank(id), uploader_id INTEGER NOT NULL REFERENCES users(id), name TEXT NOT NULL, storage_name TEXT NOT NULL UNIQUE, size INTEGER NOT NULL, mime TEXT NOT NULL DEFAULT 'application/octet-stream', deleted INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now')));
+    CREATE INDEX IF NOT EXISTS idx_question_bank_files_item ON question_bank_files(bank_item_id,deleted,id);
     CREATE TABLE IF NOT EXISTS homeworks (id INTEGER PRIMARY KEY, student_id INTEGER NOT NULL REFERENCES users(id), created_by INTEGER NOT NULL REFERENCES users(id), group_id TEXT, title TEXT NOT NULL, subject TEXT NOT NULL, description TEXT NOT NULL DEFAULT '', due_date TEXT NOT NULL DEFAULT '', status TEXT NOT NULL DEFAULT 'assigned' CHECK(status IN ('assigned','submitted','revision','done')), feedback TEXT NOT NULL DEFAULT '', score INTEGER, max_score INTEGER NOT NULL DEFAULT 1, submitted_at TEXT, completed_at TEXT, created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now')), updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now')), deleted_at TEXT);
     CREATE INDEX IF NOT EXISTS idx_homeworks_student ON homeworks(student_id,deleted_at,updated_at DESC);
     CREATE INDEX IF NOT EXISTS idx_homeworks_group ON homeworks(group_id);
@@ -136,9 +138,9 @@ try {
     $method = $_SERVER['REQUEST_METHOD'];
     $data = [];
     if ($method === 'POST') {
-        if ((int)($_SERVER['CONTENT_LENGTH'] ?? 0) > (in_array($action,['upload','classwork_upload','homework_file_upload'],true) ? 11*1024*1024 : 200000)) fail('Слишком большой запрос.',413);
+        if ((int)($_SERVER['CONTENT_LENGTH'] ?? 0) > (in_array($action,['upload','classwork_upload','homework_file_upload','bank_file_upload'],true) ? 11*1024*1024 : 200000)) fail('Слишком большой запрос.',413);
         if (!hash_equals($_SESSION['csrf'],$_SERVER['HTTP_X_CSRF_TOKEN'] ?? '')) fail('Обновите страницу и повторите действие.',403);
-        if (in_array($action,['upload','classwork_upload','homework_file_upload'],true)) { $data = $_POST; } else {
+        if (in_array($action,['upload','classwork_upload','homework_file_upload','bank_file_upload'],true)) { $data = $_POST; } else {
         $raw = file_get_contents('php://input',false,null,0,200001);
         if (strlen($raw) > 200000) fail('Слишком большой запрос.',413);
         $data = json_decode($raw,true);
@@ -153,7 +155,7 @@ try {
     if (!$user) $user = restoreRemember($db,$rememberCookie,$secure);
     if ($user) $_SESSION['last_seen'] = time();
     if ($action === 'bootstrap' && $method === 'GET') reply(['installed'=>$installed,'user'=>$user ? publicUser($user) : null,'csrf'=>$_SESSION['csrf']]);
-    if ($method !== 'POST' && !in_array($action,['state','download','preview','classwork_state','classwork_download','classwork_preview','bank_state','homework_detail','homework_file_download'],true)) fail('Используйте POST.',405);
+    if ($method !== 'POST' && !in_array($action,['state','download','preview','classwork_state','classwork_download','classwork_preview','bank_state','bank_file_download','bank_file_view','homework_detail','homework_file_download'],true)) fail('Используйте POST.',405);
     if ($action === 'login' || $action === 'setup') {
         $remember = $data['remember'] ?? false;
         if (!is_bool($remember)) fail('Некорректная настройка запоминания входа.');
@@ -315,7 +317,32 @@ try {
         } else {
             $items = $db->query("SELECT q.id,q.title,q.subject,q.topic,q.difficulty,q.prompt,q.default_score,q.created_at,q.updated_at,u.name AS teacher_name FROM question_bank q JOIN users u ON u.id=q.teacher_id WHERE q.deleted_at IS NULL AND u.active=1 AND u.deleted_at IS NULL ORDER BY q.updated_at DESC,q.id DESC")->fetchAll();
         }
+        $itemIds=array_map(static fn($item)=>(int)$item['id'],$items);$byItem=[];
+        if($itemIds){$marks=implode(',',array_fill(0,count($itemIds),'?'));$files=run($db,"SELECT id,bank_item_id,name,size,mime,created_at FROM question_bank_files WHERE deleted=0 AND bank_item_id IN ($marks) ORDER BY id",$itemIds)->fetchAll();foreach($files as $file)$byItem[$file['bank_item_id']][]=$file;}
+        foreach($items as &$item)$item['files']=$byItem[$item['id']]??[];unset($item);
         reply(['user'=>publicUser($user),'items'=>$items,'csrf'=>$_SESSION['csrf']]);
+    }
+    if (in_array($action,['bank_file_upload','bank_file_delete','bank_file_download','bank_file_view'],true)) {
+        $source=in_array($action,['bank_file_download','bank_file_view'],true)?$_GET:$data;
+        if(in_array($action,['bank_file_download','bank_file_view'],true)){
+            $fileId=idValue($source,'id');$record=run($db,'SELECT f.*,q.teacher_id,q.deleted_at AS bank_deleted,u.active AS teacher_active,u.deleted_at AS teacher_deleted FROM question_bank_files f JOIN question_bank q ON q.id=f.bank_item_id JOIN users u ON u.id=q.teacher_id WHERE f.id=? AND f.deleted=0',[$fileId])->fetch();
+            if(!$record)fail('Файл не найден.',404);
+            if($user['role']==='admin'){$visible=(int)$record['teacher_id']===(int)$user['id'];}else{$visible=($record['bank_deleted']===null&&(int)$record['teacher_active']&&$record['teacher_deleted']===null)||(bool)run($db,'SELECT 1 FROM homework_questions q JOIN homeworks h ON h.id=q.homework_id WHERE q.bank_item_id=? AND h.student_id=? AND h.deleted_at IS NULL LIMIT 1',[$record['bank_item_id'],$user['id']])->fetchColumn();}
+            if(!$visible)fail('Файл не найден.',404);
+            $path=$private.'/bank_uploads/'.$record['storage_name'];if(!is_file($path))fail('Файл отсутствует на сервере.',404);
+            if($action==='bank_file_view'){
+                $imageTypes=['image/png','image/jpeg','image/gif','image/webp'];if(!in_array($record['mime'],$imageTypes,true))fail('Этот файл нельзя показать как изображение.',415);
+                header('Content-Type: '.$record['mime']);header('Content-Disposition: inline');
+            }else{header('Content-Type: application/octet-stream');header("Content-Disposition: attachment; filename=download; filename*=UTF-8''".rawurlencode($record['name']));}
+            header('Content-Length: '.filesize($path));header('Content-Security-Policy: sandbox');session_write_close();readfile($path);exit;
+        }
+        requireAdmin($user);$itemId=idValue($data,'bank_item_id');$item=run($db,'SELECT id FROM question_bank WHERE id=? AND teacher_id=? AND deleted_at IS NULL',[$itemId,$user['id']])->fetch();if(!$item)fail('Задание банка не найдено.',404);
+        if($action==='bank_file_delete'){$fileId=idValue($data,'id');$changed=run($db,'UPDATE question_bank_files SET deleted=1 WHERE id=? AND bank_item_id=? AND deleted=0',[$fileId,$itemId]);if(!$changed->rowCount())fail('Файл не найден.',404);reply(['ok'=>true]);}
+        $file=$_FILES['file']??null;if(!$file||!is_array($file)||is_array($file['error']??null)||($file['error']??UPLOAD_ERR_NO_FILE)!==UPLOAD_ERR_OK)fail('Файл не загружен.',413);
+        $name=basename(str_replace('\\','/',(string)$file['name']));if($name===''||strlen($name)>240||preg_match('/[\x00-\x1F\x7F]/',$name)||!preg_match('//u',$name))fail('Некорректное имя файла.');
+        $ext=strtolower(pathinfo($name,PATHINFO_EXTENSION));$types=['png'=>'image/png','jpg'=>'image/jpeg','jpeg'=>'image/jpeg','gif'=>'image/gif','webp'=>'image/webp','txt'=>'text/plain','md'=>'text/markdown','py'=>'text/x-python','csv'=>'text/csv','xlsx'=>'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet','xls'=>'application/vnd.ms-excel'];if(!isset($types[$ext]))fail('Можно загрузить изображение, TXT, MD, CSV, Python или Excel.');
+        $size=filesize($file['tmp_name']);if($size===false||$size>10*1024*1024)fail('Максимальный размер файла — 10 МБ.',413);if((int)run($db,'SELECT COUNT(*) FROM question_bank_files WHERE bank_item_id=? AND deleted=0',[$itemId])->fetchColumn()>=8)fail('К заданию можно прикрепить не больше 8 файлов.');
+        $directory=$private.'/bank_uploads';if(!is_dir($directory)&&!mkdir($directory,0700,true))fail('Не удалось создать папку для файлов.',503);$storage=bin2hex(random_bytes(24)).'.bin';$path=$directory.'/'.$storage;if(!move_uploaded_file($file['tmp_name'],$path))fail('Не удалось сохранить файл.',500);chmod($path,0600);run($db,'INSERT INTO question_bank_files(bank_item_id,uploader_id,name,storage_name,size,mime) VALUES(?,?,?,?,?,?)',[$itemId,$user['id'],$name,$storage,$size,$types[$ext]]);reply(['id'=>(int)$db->lastInsertId(),'name'=>$name,'size'=>$size,'mime'=>$types[$ext]],201);
     }
     if ($action === 'bank_save') {
         requireAdmin($user);
@@ -364,7 +391,9 @@ try {
         if(!$homework)fail('Домашняя работа не найдена.',404);
         $questions=run($db,'SELECT * FROM homework_questions WHERE homework_id=? ORDER BY position',[$id])->fetchAll();
         $files=run($db,'SELECT f.id,f.question_id,f.name,f.size,f.created_at FROM homework_files f JOIN homework_questions q ON q.id=f.question_id WHERE q.homework_id=? AND f.deleted=0 ORDER BY f.id',[$id])->fetchAll();$byQuestion=[];foreach($files as $file)$byQuestion[$file['question_id']][]=$file;
-        foreach($questions as &$question){$question['files']=$byQuestion[$question['id']]??[];if($user['role']!=='admin'&&$homework['status']!=='done'){unset($question['correct_answer'],$question['explanation']);}}unset($question);
+        $bankIds=array_values(array_unique(array_filter(array_map(static fn($question)=>isset($question['bank_item_id'])?(int)$question['bank_item_id']:0,$questions))));$materialsByBank=[];
+        if($bankIds){$marks=implode(',',array_fill(0,count($bankIds),'?'));$materials=run($db,"SELECT id,bank_item_id,name,size,mime FROM question_bank_files WHERE deleted=0 AND bank_item_id IN ($marks) ORDER BY id",$bankIds)->fetchAll();foreach($materials as $material)$materialsByBank[$material['bank_item_id']][]=$material;}
+        foreach($questions as &$question){$question['files']=$byQuestion[$question['id']]??[];$question['materials']=$materialsByBank[$question['bank_item_id']]??[];if($user['role']!=='admin'&&$homework['status']!=='done'){unset($question['correct_answer'],$question['explanation']);}}unset($question);
         reply(['user'=>publicUser($user),'homework'=>$homework,'questions'=>$questions,'csrf'=>$_SESSION['csrf']]);
     }
     if ($action === 'homework_save_progress') {
