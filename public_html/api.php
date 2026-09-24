@@ -310,8 +310,11 @@ try {
         fail('Неизвестное действие.',404);
     }
     if ($action === 'bank_state') {
-        requireAdmin($user);
-        $items = run($db,'SELECT id,title,subject,topic,difficulty,prompt,correct_answer,explanation,default_score,created_at,updated_at FROM question_bank WHERE teacher_id=? AND deleted_at IS NULL ORDER BY updated_at DESC,id DESC',[$user['id']])->fetchAll();
+        if ($user['role'] === 'admin') {
+            $items = run($db,'SELECT id,title,subject,topic,difficulty,prompt,correct_answer,explanation,default_score,created_at,updated_at FROM question_bank WHERE teacher_id=? AND deleted_at IS NULL ORDER BY updated_at DESC,id DESC',[$user['id']])->fetchAll();
+        } else {
+            $items = $db->query("SELECT q.id,q.title,q.subject,q.topic,q.difficulty,q.prompt,q.default_score,q.created_at,q.updated_at,u.name AS teacher_name FROM question_bank q JOIN users u ON u.id=q.teacher_id WHERE q.deleted_at IS NULL AND u.active=1 AND u.deleted_at IS NULL ORDER BY q.updated_at DESC,q.id DESC")->fetchAll();
+        }
         reply(['user'=>publicUser($user),'items'=>$items,'csrf'=>$_SESSION['csrf']]);
     }
     if ($action === 'bank_save') {
