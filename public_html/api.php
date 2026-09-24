@@ -110,7 +110,7 @@ try {
     CREATE INDEX IF NOT EXISTS idx_classwork_student ON classwork_files(student_id,deleted,relative_path);
     CREATE TABLE IF NOT EXISTS remember_tokens (selector TEXT PRIMARY KEY, user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE, token_hash TEXT NOT NULL, auth_version INTEGER NOT NULL, expires_at INTEGER NOT NULL, last_used_at INTEGER NOT NULL DEFAULT (strftime('%s','now')));
     CREATE INDEX IF NOT EXISTS idx_remember_user ON remember_tokens(user_id);
-    CREATE TABLE IF NOT EXISTS question_bank (id INTEGER PRIMARY KEY, teacher_id INTEGER NOT NULL REFERENCES users(id), title TEXT NOT NULL, subject TEXT NOT NULL, topic TEXT NOT NULL DEFAULT '', difficulty TEXT NOT NULL DEFAULT 'medium' CHECK(difficulty IN ('easy','medium','hard')), prompt TEXT NOT NULL, correct_answer TEXT NOT NULL, explanation TEXT NOT NULL DEFAULT '', default_score INTEGER NOT NULL DEFAULT 1, created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now')), updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now')), deleted_at TEXT);
+    CREATE TABLE IF NOT EXISTS question_bank (id INTEGER PRIMARY KEY, teacher_id INTEGER NOT NULL REFERENCES users(id), title TEXT NOT NULL, subject TEXT NOT NULL, topic TEXT NOT NULL DEFAULT '', exam_number INTEGER CHECK(exam_number BETWEEN 1 AND 27), difficulty TEXT NOT NULL DEFAULT 'medium' CHECK(difficulty IN ('easy','medium','hard')), prompt TEXT NOT NULL, correct_answer TEXT NOT NULL, explanation TEXT NOT NULL DEFAULT '', default_score INTEGER NOT NULL DEFAULT 1, created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now')), updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now')), deleted_at TEXT);
     CREATE INDEX IF NOT EXISTS idx_question_bank_teacher ON question_bank(teacher_id,deleted_at,updated_at DESC);
     CREATE TABLE IF NOT EXISTS question_bank_files (id INTEGER PRIMARY KEY, bank_item_id INTEGER NOT NULL REFERENCES question_bank(id), uploader_id INTEGER NOT NULL REFERENCES users(id), name TEXT NOT NULL, storage_name TEXT NOT NULL UNIQUE, size INTEGER NOT NULL, mime TEXT NOT NULL DEFAULT 'application/octet-stream', deleted INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now')));
     CREATE INDEX IF NOT EXISTS idx_question_bank_files_item ON question_bank_files(bank_item_id,deleted,id);
@@ -131,6 +131,8 @@ try {
     $attachmentColumns=array_column($db->query('PRAGMA table_info(attachments)')->fetchAll(),'name');
     if(!in_array('relative_path',$attachmentColumns,true))$db->exec('ALTER TABLE attachments ADD COLUMN relative_path TEXT');
     $db->exec("UPDATE attachments SET relative_path=name WHERE relative_path IS NULL OR relative_path=''");
+    $bankColumns=array_column($db->query('PRAGMA table_info(question_bank)')->fetchAll(),'name');
+    if(!in_array('exam_number',$bankColumns,true))$db->exec('ALTER TABLE question_bank ADD COLUMN exam_number INTEGER');
     if (is_file($private.'/kourage.sqlite')) @chmod($private.'/kourage.sqlite',0600);
     run($db,'DELETE FROM remember_tokens WHERE expires_at < ?',[time()]);
     $_SESSION['csrf'] ??= bin2hex(random_bytes(24));
@@ -313,9 +315,9 @@ try {
     }
     if ($action === 'bank_state') {
         if ($user['role'] === 'admin') {
-            $items = run($db,'SELECT id,title,subject,topic,difficulty,prompt,correct_answer,explanation,default_score,created_at,updated_at FROM question_bank WHERE teacher_id=? AND deleted_at IS NULL ORDER BY updated_at DESC,id DESC',[$user['id']])->fetchAll();
+            $items = run($db,'SELECT id,title,subject,topic,exam_number,difficulty,prompt,correct_answer,explanation,default_score,created_at,updated_at FROM question_bank WHERE teacher_id=? AND deleted_at IS NULL ORDER BY updated_at DESC,id DESC',[$user['id']])->fetchAll();
         } else {
-            $items = $db->query("SELECT q.id,q.title,q.subject,q.topic,q.difficulty,q.prompt,q.default_score,q.created_at,q.updated_at,u.name AS teacher_name FROM question_bank q JOIN users u ON u.id=q.teacher_id WHERE q.deleted_at IS NULL AND u.active=1 AND u.deleted_at IS NULL ORDER BY q.updated_at DESC,q.id DESC")->fetchAll();
+            $items = $db->query("SELECT q.id,q.title,q.subject,q.topic,q.exam_number,q.difficulty,q.prompt,q.default_score,q.created_at,q.updated_at,u.name AS teacher_name FROM question_bank q JOIN users u ON u.id=q.teacher_id WHERE q.deleted_at IS NULL AND u.active=1 AND u.deleted_at IS NULL ORDER BY q.updated_at DESC,q.id DESC")->fetchAll();
         }
         $itemIds=array_map(static fn($item)=>(int)$item['id'],$items);$byItem=[];
         if($itemIds){$marks=implode(',',array_fill(0,count($itemIds),'?'));$files=run($db,"SELECT id,bank_item_id,name,size,mime,created_at FROM question_bank_files WHERE deleted=0 AND bank_item_id IN ($marks) ORDER BY id",$itemIds)->fetchAll();foreach($files as $file)$byItem[$file['bank_item_id']][]=$file;}
@@ -347,15 +349,16 @@ try {
     if ($action === 'bank_save') {
         requireAdmin($user);
         $title=textValue($data,'title',250,true);$subject=textValue($data,'subject',100,true);$topic=textValue($data,'topic',100);
+        $examNumber=filter_var($data['exam_number']??null,FILTER_VALIDATE_INT);if($examNumber===false||$examNumber<1||$examNumber>27)fail('Выберите номер задания от 1 до 27.');
         $difficulty=textValue($data,'difficulty',20,true);if(!in_array($difficulty,['easy','medium','hard'],true))fail('Некорректная сложность.');
         $prompt=textValue($data,'prompt',30000,true);$answer=textValue($data,'correct_answer',5000,true);$explanation=textValue($data,'explanation',15000);
         $score=filter_var($data['default_score']??null,FILTER_VALIDATE_INT);if($score===false||$score<1||$score>1000)fail('Балл должен быть от 1 до 1000.');
         if(!empty($data['id'])){
             $id=idValue($data,'id');
-            $changed=run($db,"UPDATE question_bank SET title=?,subject=?,topic=?,difficulty=?,prompt=?,correct_answer=?,explanation=?,default_score=?,updated_at=strftime('%Y-%m-%dT%H:%M:%SZ','now') WHERE id=? AND teacher_id=? AND deleted_at IS NULL",[$title,$subject,$topic,$difficulty,$prompt,$answer,$explanation,$score,$id,$user['id']]);
+            $changed=run($db,"UPDATE question_bank SET title=?,subject=?,topic=?,exam_number=?,difficulty=?,prompt=?,correct_answer=?,explanation=?,default_score=?,updated_at=strftime('%Y-%m-%dT%H:%M:%SZ','now') WHERE id=? AND teacher_id=? AND deleted_at IS NULL",[$title,$subject,$topic,$examNumber,$difficulty,$prompt,$answer,$explanation,$score,$id,$user['id']]);
             if(!$changed->rowCount())fail('Задание банка не найдено.',404);
         }else{
-            run($db,'INSERT INTO question_bank(teacher_id,title,subject,topic,difficulty,prompt,correct_answer,explanation,default_score) VALUES(?,?,?,?,?,?,?,?,?)',[$user['id'],$title,$subject,$topic,$difficulty,$prompt,$answer,$explanation,$score]);
+            run($db,'INSERT INTO question_bank(teacher_id,title,subject,topic,exam_number,difficulty,prompt,correct_answer,explanation,default_score) VALUES(?,?,?,?,?,?,?,?,?,?)',[$user['id'],$title,$subject,$topic,$examNumber,$difficulty,$prompt,$answer,$explanation,$score]);
             $id=(int)$db->lastInsertId();
         }
         reply(['id'=>$id]);
