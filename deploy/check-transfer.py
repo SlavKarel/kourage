@@ -5,7 +5,12 @@ import subprocess
 
 root = Path(__file__).resolve().parents[1]
 files = (root / 'deploy/public-files.txt').read_text().splitlines()
-assert files == ['api.php', 'assets/app.js', 'assets/favicon.svg', 'assets/style.css', 'index.html']
+assert files == [
+    'api.php', 'assets/app.js', 'assets/bank.js', 'assets/builder.js',
+    'assets/classwork.js', 'assets/favicon.svg', 'assets/homework.js',
+    'assets/style.css', 'bank.html', 'builder.html', 'classwork.html',
+    'homework.html', 'index.html',
+]
 with TemporaryDirectory(prefix='kourage-transfer-check-') as folder:
     site = Path(folder) / 'courage'
     target = site / 'public_html'
@@ -35,4 +40,4 @@ with TemporaryDirectory(prefix='kourage-transfer-check-') as folder:
         assert (site / '.code-backups/test' / name).read_text() == 'previous code: ' + name
     for file, content in protected.items():
         assert file.read_bytes() == content, str(file)
-print('PASS: only the five listed code files changed; old code backed up; database, uploads, configuration and other pages preserved. This is a local transfer test, not a live deployment.')
+print('PASS: only listed public code files changed; old code backed up; database, uploads and configuration preserved. This is a local transfer test, not a live deployment.')
