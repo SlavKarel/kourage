@@ -110,6 +110,7 @@ try {
     CREATE INDEX IF NOT EXISTS idx_classwork_student ON classwork_files(student_id,deleted,relative_path);
     CREATE TABLE IF NOT EXISTS editor_presence (student_id INTEGER NOT NULL REFERENCES users(id), user_id INTEGER NOT NULL REFERENCES users(id), file_id INTEGER, cursor_start INTEGER NOT NULL DEFAULT 0, cursor_end INTEGER NOT NULL DEFAULT 0, last_seen INTEGER NOT NULL, PRIMARY KEY(student_id,user_id));
     CREATE INDEX IF NOT EXISTS idx_editor_presence_seen ON editor_presence(student_id,last_seen);
+    CREATE TABLE IF NOT EXISTS editor_runs (student_id INTEGER PRIMARY KEY REFERENCES users(id), file_id INTEGER NOT NULL REFERENCES classwork_files(id), run_id TEXT NOT NULL, runner_id INTEGER NOT NULL REFERENCES users(id), status TEXT NOT NULL CHECK(status IN ('running','done','error','stopped')), stdin TEXT NOT NULL DEFAULT '', output TEXT NOT NULL DEFAULT '', updated_at INTEGER NOT NULL);
     CREATE TABLE IF NOT EXISTS remember_tokens (selector TEXT PRIMARY KEY, user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE, token_hash TEXT NOT NULL, auth_version INTEGER NOT NULL, expires_at INTEGER NOT NULL, last_used_at INTEGER NOT NULL DEFAULT (strftime('%s','now')));
     CREATE INDEX IF NOT EXISTS idx_remember_user ON remember_tokens(user_id);
     CREATE TABLE IF NOT EXISTS question_bank (id INTEGER PRIMARY KEY, teacher_id INTEGER NOT NULL REFERENCES users(id), title TEXT NOT NULL, subject TEXT NOT NULL, topic TEXT NOT NULL DEFAULT '', exam_number INTEGER CHECK(exam_number BETWEEN 1 AND 27), difficulty TEXT NOT NULL DEFAULT 'medium' CHECK(difficulty IN ('easy','medium','hard')), prompt TEXT NOT NULL, correct_answer TEXT NOT NULL, explanation TEXT NOT NULL DEFAULT '', default_score INTEGER NOT NULL DEFAULT 1, created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now')), updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now')), deleted_at TEXT);
@@ -300,6 +301,37 @@ try {
             run($db,'DELETE FROM editor_presence WHERE last_seen < ?',[time()-45]);
             $presence=run($db,"SELECT p.user_id,p.file_id,p.cursor_start,p.cursor_end,p.last_seen,u.name,u.role FROM editor_presence p JOIN users u ON u.id=p.user_id WHERE p.student_id=? AND p.last_seen>=? ORDER BY u.role,u.name",[$studentId,time()-45])->fetchAll();
             reply(['presence'=>$presence]);
+        }
+        if($action==='editor_sync'){
+            $fileId=idValue($data,'file_id');$known=max(0,(int)($data['revision']??0));
+            $record=run($db,'SELECT * FROM classwork_files WHERE id=? AND student_id=? AND deleted=0',[$fileId,$studentId])->fetch();if(!$record)fail('Файл не найден.',404);
+            $cursorStart=max(0,min(200000,(int)($data['cursor_start']??0)));$cursorEnd=max(0,min(200000,(int)($data['cursor_end']??$cursorStart)));
+            run($db,'INSERT INTO editor_presence(student_id,user_id,file_id,cursor_start,cursor_end,last_seen) VALUES(?,?,?,?,?,?) ON CONFLICT(student_id,user_id) DO UPDATE SET file_id=excluded.file_id,cursor_start=excluded.cursor_start,cursor_end=excluded.cursor_end,last_seen=excluded.last_seen',[$studentId,$user['id'],$fileId,$cursorStart,$cursorEnd,time()]);
+            if(array_key_exists('content',$data)){
+                $content=$data['content'];if(!is_string($content)||strlen($content)>190000||!preg_match('//u',$content))fail('Код должен быть текстом не больше 190 КБ.');$expected=(int)($data['expected_revision']??0);
+                $db->exec('BEGIN IMMEDIATE');try{$record=run($db,'SELECT * FROM classwork_files WHERE id=? AND student_id=? AND deleted=0',[$fileId,$studentId])->fetch();if(!$record){$db->exec('ROLLBACK');fail('Файл не найден.',404);}if((int)$record['revision']!==$expected){$path=$directory.'/'.$record['storage_name'];$remote=is_file($path)?file_get_contents($path):false;$db->exec('ROLLBACK');if($remote===false)fail('Файл отсутствует на сервере.',404);reply(['error'=>'Файл уже изменён другим участником.','content'=>$remote,'revision'=>(int)$record['revision']],409);}
+                    $ext=strtolower(pathinfo($record['name'],PATHINFO_EXTENSION));if(!in_array($ext,$editable,true)){$db->exec('ROLLBACK');fail('Этот файл нельзя редактировать в браузере.',415);}$path=$directory.'/'.$record['storage_name'];$temp=tempnam($directory,'edit-');if($temp===false||file_put_contents($temp,$content,LOCK_EX)===false){if($temp)@unlink($temp);$db->exec('ROLLBACK');fail('Не удалось сохранить файл.',503);}chmod($temp,0600);if(!rename($temp,$path)){@unlink($temp);$db->exec('ROLLBACK');fail('Не удалось заменить файл.',503);}run($db,"UPDATE classwork_files SET uploader_id=?,size=?,revision=revision+1,updated_at=strftime('%Y-%m-%dT%H:%M:%SZ','now') WHERE id=?",[$user['id'],strlen($content),$fileId]);$db->exec('COMMIT');$known=$expected+1;
+                }catch(Throwable $error){if($db->inTransaction())$db->exec('ROLLBACK');throw $error;}
+            }
+            run($db,'DELETE FROM editor_presence WHERE last_seen < ?',[time()-15]);
+            $latest=run($db,'SELECT revision,updated_at FROM classwork_files WHERE id=?',[$fileId])->fetch();$payload=['ok'=>true,'revision'=>(int)$latest['revision'],'updated_at'=>$latest['updated_at']];
+            if((int)$latest['revision']>$known){$path=$directory.'/'.$record['storage_name'];$remote=is_file($path)?file_get_contents($path):false;if($remote===false)fail('Файл отсутствует на сервере.',404);$payload['content']=$remote;}
+            $payload['presence']=run($db,"SELECT p.user_id,p.file_id,p.cursor_start,p.cursor_end,p.last_seen,u.name,u.role FROM editor_presence p JOIN users u ON u.id=p.user_id WHERE p.student_id=? AND p.last_seen>=? ORDER BY u.role,u.name",[$studentId,time()-15])->fetchAll();
+            $payload['run']=run($db,"SELECT r.student_id,r.file_id,r.run_id,r.runner_id,r.status,r.stdin,r.output,r.updated_at,u.name AS runner_name FROM editor_runs r JOIN users u ON u.id=r.runner_id WHERE r.student_id=?",[$studentId])->fetch()?:null;
+            reply($payload);
+        }
+        if($action==='editor_run_start'){
+            $fileId=idValue($data,'file_id');$record=run($db,'SELECT id,name FROM classwork_files WHERE id=? AND student_id=? AND deleted=0',[$fileId,$studentId])->fetch();if(!$record||strtolower(pathinfo($record['name'],PATHINFO_EXTENSION))!=='py')fail('Выберите Python-файл.',400);
+            $stdin=$data['stdin']??'';if(!is_string($stdin)||strlen($stdin)>20000)fail('Слишком много входных данных.');$runId=bin2hex(random_bytes(16));
+            run($db,"INSERT INTO editor_runs(student_id,file_id,run_id,runner_id,status,stdin,output,updated_at) VALUES(?,?,?,?,'running',?,'',?) ON CONFLICT(student_id) DO UPDATE SET file_id=excluded.file_id,run_id=excluded.run_id,runner_id=excluded.runner_id,status='running',stdin=excluded.stdin,output='',updated_at=excluded.updated_at",[$studentId,$fileId,$runId,$user['id'],$stdin,time()]);
+            reply(['run_id'=>$runId,'file_id'=>$fileId,'runner_id'=>(int)$user['id'],'runner_name'=>$user['name'],'status'=>'running','stdin'=>$stdin,'output'=>'','updated_at'=>time()]);
+        }
+        if($action==='editor_run_update'){
+            $runId=$data['run_id']??'';$status=$data['status']??'running';$output=$data['output']??'';if(!is_string($runId)||!preg_match('/^[a-f0-9]{32}$/D',$runId)||!in_array($status,['running','done','error'],true)||!is_string($output)||strlen($output)>190000)fail('Некорректный результат запуска.');
+            $changed=run($db,'UPDATE editor_runs SET status=?,output=?,updated_at=? WHERE student_id=? AND run_id=? AND runner_id=?',[$status,$output,time(),$studentId,$runId,$user['id']])->rowCount();if(!$changed)fail('Этот запуск уже завершён или заменён.',409);reply(['ok'=>true]);
+        }
+        if($action==='editor_run_stop'){
+            $runId=$data['run_id']??'';if(!is_string($runId)||!preg_match('/^[a-f0-9]{32}$/D',$runId))fail('Некорректный запуск.');run($db,"UPDATE editor_runs SET status='stopped',updated_at=? WHERE student_id=? AND run_id=? AND status='running'",[time(),$studentId,$runId]);reply(['ok'=>true]);
         }
         if($action==='editor_create'){
             $relative=textValue($data,'path',500,true);$relative=str_replace('\\','/',$relative);if(str_starts_with($relative,'/')||str_contains($relative,'//'))fail('Некорректный путь файла.');foreach(explode('/',$relative) as $segment)if($segment===''||$segment==='.'||$segment==='..'||preg_match('/[\x00-\x1F\x7F]/',$segment))fail('Некорректный путь файла.');
