@@ -108,6 +108,8 @@ try {
     CREATE INDEX IF NOT EXISTS idx_attachments_task ON attachments(task_id,deleted);
     CREATE TABLE IF NOT EXISTS classwork_files (id INTEGER PRIMARY KEY, student_id INTEGER NOT NULL REFERENCES users(id), uploader_id INTEGER NOT NULL REFERENCES users(id), name TEXT NOT NULL, relative_path TEXT NOT NULL, storage_name TEXT NOT NULL UNIQUE, size INTEGER NOT NULL, deleted INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now')));
     CREATE INDEX IF NOT EXISTS idx_classwork_student ON classwork_files(student_id,deleted,relative_path);
+    CREATE TABLE IF NOT EXISTS editor_presence (student_id INTEGER NOT NULL REFERENCES users(id), user_id INTEGER NOT NULL REFERENCES users(id), file_id INTEGER, cursor_start INTEGER NOT NULL DEFAULT 0, cursor_end INTEGER NOT NULL DEFAULT 0, last_seen INTEGER NOT NULL, PRIMARY KEY(student_id,user_id));
+    CREATE INDEX IF NOT EXISTS idx_editor_presence_seen ON editor_presence(student_id,last_seen);
     CREATE TABLE IF NOT EXISTS remember_tokens (selector TEXT PRIMARY KEY, user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE, token_hash TEXT NOT NULL, auth_version INTEGER NOT NULL, expires_at INTEGER NOT NULL, last_used_at INTEGER NOT NULL DEFAULT (strftime('%s','now')));
     CREATE INDEX IF NOT EXISTS idx_remember_user ON remember_tokens(user_id);
     CREATE TABLE IF NOT EXISTS question_bank (id INTEGER PRIMARY KEY, teacher_id INTEGER NOT NULL REFERENCES users(id), title TEXT NOT NULL, subject TEXT NOT NULL, topic TEXT NOT NULL DEFAULT '', exam_number INTEGER CHECK(exam_number BETWEEN 1 AND 27), difficulty TEXT NOT NULL DEFAULT 'medium' CHECK(difficulty IN ('easy','medium','hard')), prompt TEXT NOT NULL, correct_answer TEXT NOT NULL, explanation TEXT NOT NULL DEFAULT '', default_score INTEGER NOT NULL DEFAULT 1, created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now')), updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now')), deleted_at TEXT);
@@ -133,6 +135,10 @@ try {
     $db->exec("UPDATE attachments SET relative_path=name WHERE relative_path IS NULL OR relative_path=''");
     $bankColumns=array_column($db->query('PRAGMA table_info(question_bank)')->fetchAll(),'name');
     if(!in_array('exam_number',$bankColumns,true))$db->exec('ALTER TABLE question_bank ADD COLUMN exam_number INTEGER');
+    $classworkColumns=array_column($db->query('PRAGMA table_info(classwork_files)')->fetchAll(),'name');
+    if(!in_array('revision',$classworkColumns,true))$db->exec('ALTER TABLE classwork_files ADD COLUMN revision INTEGER NOT NULL DEFAULT 1');
+    if(!in_array('updated_at',$classworkColumns,true))$db->exec("ALTER TABLE classwork_files ADD COLUMN updated_at TEXT");
+    $db->exec("UPDATE classwork_files SET updated_at=created_at WHERE updated_at IS NULL OR updated_at=''");
     if (is_file($private.'/kourage.sqlite')) @chmod($private.'/kourage.sqlite',0600);
     run($db,'DELETE FROM remember_tokens WHERE expires_at < ?',[time()]);
     $_SESSION['csrf'] ??= bin2hex(random_bytes(24));
@@ -157,7 +163,7 @@ try {
     if (!$user) $user = restoreRemember($db,$rememberCookie,$secure);
     if ($user) $_SESSION['last_seen'] = time();
     if ($action === 'bootstrap' && $method === 'GET') reply(['installed'=>$installed,'user'=>$user ? publicUser($user) : null,'csrf'=>$_SESSION['csrf']]);
-    if ($method !== 'POST' && !in_array($action,['state','download','preview','classwork_state','classwork_download','classwork_preview','bank_state','bank_file_download','bank_file_view','homework_detail','homework_file_download'],true)) fail('Используйте POST.',405);
+    if ($method !== 'POST' && !in_array($action,['state','download','preview','classwork_state','classwork_download','classwork_preview','editor_state','editor_file','bank_state','bank_file_download','bank_file_view','homework_detail','homework_file_download'],true)) fail('Используйте POST.',405);
     if ($action === 'login' || $action === 'setup') {
         $remember = $data['remember'] ?? false;
         if (!is_bool($remember)) fail('Некорректная настройка запоминания входа.');
@@ -265,6 +271,54 @@ try {
         } catch (Throwable $error) { $db->exec('ROLLBACK'); if (is_file($path)) unlink($path); throw $error; }
         reply(['id'=>$id,'name'=>$name,'path'=>$relative,'size'=>$size],201);
     }
+    if (str_starts_with($action,'editor_')) {
+        $editable=['txt','csv','md','py','js','ts','jsx','tsx','html','css','json','xml','yaml','yml','sql','java','c','cpp','h','hpp','cs','go','rs','php','sh','ini','toml'];
+        $editorSource=$method==='GET'?$_GET:$data;
+        $studentId=$user['role']==='admin'?(isset($editorSource['student_id'])?idValue($editorSource,'student_id'):0):(int)$user['id'];
+        if($user['role']==='admin'&&$studentId===0&&$action==='editor_state')$studentId=(int)($db->query("SELECT id FROM users WHERE role='student' AND active=1 AND deleted_at IS NULL ORDER BY name LIMIT 1")->fetchColumn()?:0);
+        if($studentId&&!run($db,"SELECT id FROM users WHERE id=? AND role='student' AND active=1 AND deleted_at IS NULL",[$studentId])->fetch())fail('Активный ученик не найден.',404);
+        $directory=$private.'/classwork_uploads';
+        if($action==='editor_state'){
+            $students=$user['role']==='admin'?$db->query("SELECT id,name,login,active FROM users WHERE role='student' AND deleted_at IS NULL ORDER BY active DESC,name")->fetchAll():[];
+            $files=$studentId?run($db,'SELECT id,student_id,name,relative_path,size,revision,updated_at,created_at FROM classwork_files WHERE student_id=? AND deleted=0 ORDER BY relative_path',[$studentId])->fetchAll():[];
+            run($db,'DELETE FROM editor_presence WHERE last_seen < ?',[time()-45]);
+            $presence=$studentId?run($db,"SELECT p.user_id,p.file_id,p.cursor_start,p.cursor_end,p.last_seen,u.name,u.role FROM editor_presence p JOIN users u ON u.id=p.user_id WHERE p.student_id=? AND p.last_seen>=? ORDER BY u.role,u.name",[$studentId,time()-45])->fetchAll():[];
+            reply(['user'=>publicUser($user),'students'=>$students,'student_id'=>$studentId,'files'=>$files,'presence'=>$presence,'csrf'=>$_SESSION['csrf']]);
+        }
+        if(!$studentId)fail('Сначала выберите ученика.',400);
+        if($action==='editor_file'){
+            $record=run($db,'SELECT * FROM classwork_files WHERE id=? AND student_id=? AND deleted=0',[idValue($_GET,'id'),$studentId])->fetch();
+            if(!$record)fail('Файл не найден.',404);$ext=strtolower(pathinfo($record['name'],PATHINFO_EXTENSION));if(!in_array($ext,$editable,true))fail('Этот файл нельзя редактировать в браузере.',415);
+            $path=$directory.'/'.$record['storage_name'];if(!is_file($path))fail('Файл отсутствует на сервере.',404);$size=filesize($path);if($size===false||$size>200000)fail('В редакторе можно открыть текстовый файл не больше 200 КБ.',413);$content=file_get_contents($path);if($content===false||!preg_match('//u',$content))fail('Файл не является текстовым.',415);
+            reply(['id'=>(int)$record['id'],'student_id'=>(int)$record['student_id'],'name'=>$record['name'],'path'=>$record['relative_path'],'content'=>$content,'revision'=>(int)$record['revision'],'updated_at'=>$record['updated_at']]);
+        }
+        if($action==='editor_presence'){
+            $fileId=isset($data['file_id'])&&$data['file_id']!==null?(int)$data['file_id']:null;if($fileId!==null&&$fileId<1)fail('Некорректный файл.');
+            if($fileId&&!run($db,'SELECT id FROM classwork_files WHERE id=? AND student_id=? AND deleted=0',[$fileId,$studentId])->fetch())fail('Файл не найден.',404);
+            $cursorStart=max(0,min(200000,(int)($data['cursor_start']??0)));$cursorEnd=max($cursorStart,min(200000,(int)($data['cursor_end']??$cursorStart)));
+            run($db,'INSERT INTO editor_presence(student_id,user_id,file_id,cursor_start,cursor_end,last_seen) VALUES(?,?,?,?,?,?) ON CONFLICT(student_id,user_id) DO UPDATE SET file_id=excluded.file_id,cursor_start=excluded.cursor_start,cursor_end=excluded.cursor_end,last_seen=excluded.last_seen',[$studentId,$user['id'],$fileId,$cursorStart,$cursorEnd,time()]);
+            run($db,'DELETE FROM editor_presence WHERE last_seen < ?',[time()-45]);
+            $presence=run($db,"SELECT p.user_id,p.file_id,p.cursor_start,p.cursor_end,p.last_seen,u.name,u.role FROM editor_presence p JOIN users u ON u.id=p.user_id WHERE p.student_id=? AND p.last_seen>=? ORDER BY u.role,u.name",[$studentId,time()-45])->fetchAll();
+            reply(['presence'=>$presence]);
+        }
+        if($action==='editor_create'){
+            $relative=textValue($data,'path',500,true);$relative=str_replace('\\','/',$relative);if(str_starts_with($relative,'/')||str_contains($relative,'//'))fail('Некорректный путь файла.');foreach(explode('/',$relative) as $segment)if($segment===''||$segment==='.'||$segment==='..'||preg_match('/[\x00-\x1F\x7F]/',$segment))fail('Некорректный путь файла.');
+            $name=basename($relative);$ext=strtolower(pathinfo($name,PATHINFO_EXTENSION));if(!in_array($ext,$editable,true))fail('Создай текстовый файл, например main.py или notes.txt.');
+            if(run($db,'SELECT id FROM classwork_files WHERE student_id=? AND relative_path=? AND deleted=0',[$studentId,$relative])->fetch())fail('Файл с таким именем уже существует.',409);
+            if((int)run($db,'SELECT COUNT(*) FROM classwork_files WHERE student_id=? AND deleted=0',[$studentId])->fetchColumn()>=200)fail('В папке ученика может быть не больше 200 файлов.');
+            if(!is_dir($directory)&&!mkdir($directory,0700,true))fail('Не удалось создать папку для файлов.',503);$storage=bin2hex(random_bytes(24)).'.bin';$path=$directory.'/'.$storage;if(file_put_contents($path,'',LOCK_EX)===false)fail('Не удалось создать файл.',503);chmod($path,0600);
+            try{run($db,"INSERT INTO classwork_files(student_id,uploader_id,name,relative_path,storage_name,size,revision,updated_at) VALUES(?,?,?,?,?,0,1,strftime('%Y-%m-%dT%H:%M:%SZ','now'))",[$studentId,$user['id'],$name,$relative,$storage]);$id=(int)$db->lastInsertId();}catch(Throwable $error){@unlink($path);throw $error;}
+            reply(['id'=>$id,'name'=>$name,'path'=>$relative,'size'=>0,'revision'=>1],201);
+        }
+        if($action==='editor_save'){
+            $id=idValue($data,'id');$content=$data['content']??null;if(!is_string($content)||strlen($content)>200000||!preg_match('//u',$content))fail('Код должен быть текстом не больше 200 КБ.');$expected=filter_var($data['revision']??null,FILTER_VALIDATE_INT);if($expected===false||$expected<1)fail('Некорректная версия файла.');
+            $db->exec('BEGIN IMMEDIATE');try{$record=run($db,'SELECT * FROM classwork_files WHERE id=? AND student_id=? AND deleted=0',[$id,$studentId])->fetch();if(!$record){$db->exec('ROLLBACK');fail('Файл не найден.',404);}if((int)$record['revision']!==(int)$expected){$path=$directory.'/'.$record['storage_name'];$current=is_file($path)?file_get_contents($path):false;$db->exec('ROLLBACK');if($current===false)fail('Файл отсутствует на сервере.',404);reply(['error'=>'Файл уже изменён другим участником.','content'=>$current,'revision'=>(int)$record['revision'],'updated_at'=>$record['updated_at']],409);}
+                $ext=strtolower(pathinfo($record['name'],PATHINFO_EXTENSION));if(!in_array($ext,$editable,true)){$db->exec('ROLLBACK');fail('Этот файл нельзя редактировать в браузере.',415);}if(!is_dir($directory)){$db->exec('ROLLBACK');fail('Папка файлов недоступна.',503);}$path=$directory.'/'.$record['storage_name'];$temp=tempnam($directory,'edit-');if($temp===false||file_put_contents($temp,$content,LOCK_EX)===false){if($temp)@unlink($temp);$db->exec('ROLLBACK');fail('Не удалось сохранить файл.',503);}chmod($temp,0600);if(!rename($temp,$path)){@unlink($temp);$db->exec('ROLLBACK');fail('Не удалось заменить файл.',503);}run($db,"UPDATE classwork_files SET uploader_id=?,size=?,revision=revision+1,updated_at=strftime('%Y-%m-%dT%H:%M:%SZ','now') WHERE id=?",[$user['id'],strlen($content),$id]);$revision=(int)$expected+1;$db->exec('COMMIT');
+            }catch(Throwable $error){if($db->inTransaction())$db->exec('ROLLBACK');throw $error;}
+            reply(['ok'=>true,'revision'=>$revision,'size'=>strlen($content),'updated_at'=>gmdate('Y-m-d\TH:i:s\Z')]);
+        }
+        fail('Неизвестное действие.',404);
+    }
     if (str_starts_with($action,'classwork_')) {
         $previewable=['','txt','csv','md','py','js','ts','jsx','tsx','html','css','json','xml','yaml','yml','sql','java','c','cpp','h','hpp','cs','go','rs','php','sh','ini','toml'];
         $allowed=array_merge($previewable,['xlsx','xls']);
@@ -274,7 +328,7 @@ try {
                 $studentId=isset($_GET['student_id'])&&$_GET['student_id']!==''?idValue($_GET,'student_id'):(int)($students[0]['id']??0);
                 if($studentId&&!run($db,"SELECT id FROM users WHERE id=? AND role='student' AND deleted_at IS NULL",[$studentId])->fetch())fail('Ученик не найден.',404);
             }else{$students=[];$studentId=(int)$user['id'];}
-            $files=$studentId?run($db,'SELECT id,student_id,name,relative_path,size,created_at FROM classwork_files WHERE student_id=? AND deleted=0 ORDER BY relative_path',[$studentId])->fetchAll():[];
+            $files=$studentId?run($db,'SELECT id,student_id,name,relative_path,size,revision,updated_at,created_at FROM classwork_files WHERE student_id=? AND deleted=0 ORDER BY relative_path',[$studentId])->fetchAll():[];
             reply(['user'=>publicUser($user),'students'=>$students,'student_id'=>$studentId,'files'=>$files]);
         }
         $fileRecord=null;

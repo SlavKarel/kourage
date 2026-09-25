@@ -7,8 +7,9 @@ root = Path(__file__).resolve().parents[1]
 files = (root / 'deploy/public-files.txt').read_text().splitlines()
 assert files == [
     'api.php', 'assets/app.js', 'assets/bank.js', 'assets/builder.js',
-    'assets/classwork.js', 'assets/favicon.svg', 'assets/homework.js',
-    'assets/style.css', 'bank.html', 'builder.html', 'classwork.html',
+    'assets/classwork.js', 'assets/editor.js', 'assets/favicon.svg',
+    'assets/homework.js', 'assets/python-worker.js', 'assets/style.css',
+    'bank.html', 'builder.html', 'classwork.html', 'editor.html',
     'homework.html', 'index.html',
 ]
 with TemporaryDirectory(prefix='kourage-transfer-check-') as folder:

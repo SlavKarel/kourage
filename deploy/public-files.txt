@@ -3,11 +3,14 @@ assets/app.js
 assets/bank.js
 assets/builder.js
 assets/classwork.js
+assets/editor.js
 assets/favicon.svg
 assets/homework.js
+assets/python-worker.js
 assets/style.css
 bank.html
 builder.html
 classwork.html
+editor.html
 homework.html
 index.html
