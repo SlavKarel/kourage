@@ -1,5 +1,5 @@
 'use strict';
-const $=(selector,root=document)=>root.querySelector(selector);
+const $=(selector,root=document)=>root.querySelector(selector),$$=(selector,root=document)=>Array.from(root.querySelectorAll(selector));
 const app=$('#app'),dialog=$('#editor-dialog');
 let csrf='',user=null,students=[],studentId=0,files=[],presence=[],selectedId=0,current=null,baseContent='',revision=0,dirty=false,saving=false,saveTimer=null,pollTimer=null,presenceTimer=null,stateTimer=null,worker=null,toastTimer=null;
 const editable=new Set(['txt','csv','md','py','js','ts','jsx','tsx','html','css','json','xml','yaml','yml','sql','java','c','cpp','h','hpp','cs','go','rs','php','sh','ini','toml']);
