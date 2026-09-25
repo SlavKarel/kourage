@@ -272,7 +272,7 @@ try {
         reply(['id'=>$id,'name'=>$name,'path'=>$relative,'size'=>$size],201);
     }
     if (str_starts_with($action,'editor_')) {
-        $editable=['txt','csv','md','py','js','ts','jsx','tsx','html','css','json','xml','yaml','yml','sql','java','c','cpp','h','hpp','cs','go','rs','php','sh','ini','toml'];
+        $editable=['','txt','csv','md','py','js','ts','jsx','tsx','html','css','json','xml','yaml','yml','sql','java','c','cpp','h','hpp','cs','go','rs','php','sh','ini','toml'];
         $editorSource=$method==='GET'?$_GET:$data;
         $studentId=$user['role']==='admin'?(isset($editorSource['student_id'])?idValue($editorSource,'student_id'):0):(int)$user['id'];
         if($user['role']==='admin'&&$studentId===0&&$action==='editor_state')$studentId=(int)($db->query("SELECT id FROM users WHERE role='student' AND active=1 AND deleted_at IS NULL ORDER BY name LIMIT 1")->fetchColumn()?:0);
