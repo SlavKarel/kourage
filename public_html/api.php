@@ -317,7 +317,7 @@ try {
         if ($user['role'] === 'admin') {
             $items = run($db,'SELECT id,title,subject,topic,exam_number,difficulty,prompt,correct_answer,explanation,default_score,created_at,updated_at FROM question_bank WHERE teacher_id=? AND deleted_at IS NULL ORDER BY updated_at DESC,id DESC',[$user['id']])->fetchAll();
         } else {
-            $items = $db->query("SELECT q.id,q.title,q.subject,q.topic,q.exam_number,q.difficulty,q.prompt,q.default_score,q.created_at,q.updated_at,u.name AS teacher_name FROM question_bank q JOIN users u ON u.id=q.teacher_id WHERE q.deleted_at IS NULL AND u.active=1 AND u.deleted_at IS NULL ORDER BY q.updated_at DESC,q.id DESC")->fetchAll();
+            $items = $db->query("SELECT q.id,q.title,q.subject,q.topic,q.exam_number,q.difficulty,q.prompt,q.correct_answer,q.explanation,q.default_score,q.created_at,q.updated_at,u.name AS teacher_name FROM question_bank q JOIN users u ON u.id=q.teacher_id WHERE q.deleted_at IS NULL AND u.active=1 AND u.deleted_at IS NULL ORDER BY q.updated_at DESC,q.id DESC")->fetchAll();
         }
         $itemIds=array_map(static fn($item)=>(int)$item['id'],$items);$byItem=[];
         if($itemIds){$marks=implode(',',array_fill(0,count($itemIds),'?'));$files=run($db,"SELECT id,bank_item_id,name,size,mime,created_at FROM question_bank_files WHERE deleted=0 AND bank_item_id IN ($marks) ORDER BY id",$itemIds)->fetchAll();foreach($files as $file)$byItem[$file['bank_item_id']][]=$file;}
