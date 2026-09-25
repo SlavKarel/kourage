@@ -1,8 +1,9 @@
-'use strict';
+import { loadPyodide } from 'https://cdn.jsdelivr.net/pyodide/v314.0.7/full/pyodide.mjs';
+
 const indexURL='https://cdn.jsdelivr.net/pyodide/v314.0.7/full/';
 let runtimePromise;
 async function runtime(){
-  if(!runtimePromise)runtimePromise=(async()=>{importScripts(indexURL+'pyodide.js');return loadPyodide({indexURL});})();
+  if(!runtimePromise)runtimePromise=loadPyodide({indexURL});
   return runtimePromise;
 }
 self.onmessage=async event=>{
