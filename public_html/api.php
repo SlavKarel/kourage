@@ -169,7 +169,7 @@ try {
     if (!$user) $user = restoreRemember($db,$rememberCookie,$secure);
     if ($user) $_SESSION['last_seen'] = time();
     if ($action === 'bootstrap' && $method === 'GET') reply(['installed'=>$installed,'user'=>$user ? publicUser($user) : null,'csrf'=>$_SESSION['csrf']]);
-    if ($method !== 'POST' && !in_array($action,['state','download','preview','classwork_state','classwork_download','classwork_preview','editor_state','editor_file','bank_state','bank_file_download','bank_file_view','homework_detail','homework_file_download','meeting_state','whiteboard_state'],true)) fail('Используйте POST.',405);
+    if ($method !== 'POST' && !in_array($action,['state','download','preview','classwork_state','classwork_download','classwork_preview','editor_state','editor_file','bank_state','bank_file_download','bank_file_view','homework_detail','homework_file_download','meeting_state','meeting_redirect','whiteboard_state'],true)) fail('Используйте POST.',405);
     if ($action === 'login' || $action === 'setup') {
         $remember = $data['remember'] ?? false;
         if (!is_bool($remember)) fail('Некорректная настройка запоминания входа.');
@@ -262,6 +262,12 @@ try {
             $roomUrl='https://meet.jit.si/'.rawurlencode($roomName);
             run($db,'INSERT INTO meetings(teacher_id,student_id,room_name,room_url,expires_at) VALUES(?,?,?,?,?)',[$user['id'],$studentId,$roomName,$roomUrl,$expires]);
             reply(['meeting'=>['id'=>(int)$db->lastInsertId(),'student_id'=>$studentId,'student_name'=>$student['name'],'status'=>'active','expires_at'=>$expires,'created_at'=>gmdate('Y-m-d\TH:i:s\Z')],'created'=>true],201);
+        }
+        if($action==='meeting_redirect'){
+            $id=idValue($_GET,'id');
+            $meeting=$user['role']==='admin'?run($db,"SELECT * FROM meetings WHERE id=? AND teacher_id=? AND status='active' AND expires_at>?",[$id,$user['id'],time()])->fetch():run($db,"SELECT * FROM meetings WHERE id=? AND student_id=? AND status='active' AND expires_at>?",[$id,$user['id'],time()])->fetch();
+            if(!$meeting)fail('Встреча завершена или недоступна.',404);
+            header('Location: https://meet.jit.si/'.rawurlencode((string)$meeting['room_name']),true,302);exit;
         }
         if($action==='meeting_join'){
             $id=idValue($data,'id');
