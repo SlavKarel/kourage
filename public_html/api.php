@@ -543,7 +543,13 @@ try {
         $bankIds=array_values(array_unique(array_filter(array_map(static fn($question)=>isset($question['bank_item_id'])?(int)$question['bank_item_id']:0,$questions))));$materialsByBank=[];
         if($bankIds){$marks=implode(',',array_fill(0,count($bankIds),'?'));$materials=run($db,"SELECT id,bank_item_id,name,size,mime FROM question_bank_files WHERE deleted=0 AND bank_item_id IN ($marks) ORDER BY id",$bankIds)->fetchAll();foreach($materials as $material)$materialsByBank[$material['bank_item_id']][]=$material;}
         foreach($questions as &$question){$question['files']=$byQuestion[$question['id']]??[];$question['materials']=$materialsByBank[$question['bank_item_id']]??[];if($user['role']!=='admin'&&$homework['status']!=='done'){unset($question['correct_answer'],$question['explanation']);}}unset($question);
-        reply(['user'=>publicUser($user),'homework'=>$homework,'questions'=>$questions,'csrf'=>$_SESSION['csrf']]);
+        $students=[];$assignmentStudentIds=[];
+        if($user['role']==='admin'){
+            $students=run($db,"SELECT id,name,active FROM users WHERE role='student' AND deleted_at IS NULL ORDER BY name COLLATE NOCASE")->fetchAll();
+            $assignmentRows=!empty($homework['group_id'])?run($db,'SELECT student_id FROM homeworks WHERE group_id=? AND created_by=? AND deleted_at IS NULL ORDER BY id',[$homework['group_id'],$user['id']])->fetchAll():[['student_id'=>$homework['student_id']]];
+            $assignmentStudentIds=array_map(static fn($row)=>(int)$row['student_id'],$assignmentRows);
+        }
+        reply(['user'=>publicUser($user),'homework'=>$homework,'questions'=>$questions,'students'=>$students,'assignment_student_ids'=>$assignmentStudentIds,'csrf'=>$_SESSION['csrf']]);
     }
     if ($action === 'homework_edit') {
         requireAdmin($user);$id=idValue($data,'id');
@@ -559,6 +565,27 @@ try {
         $targets=!empty($source['group_id'])?run($db,'SELECT id FROM homeworks WHERE group_id=? AND created_by=? AND deleted_at IS NULL',[$source['group_id'],$user['id']])->fetchAll():[['id'=>$id]];
         $db->exec('BEGIN IMMEDIATE');try{foreach($targets as $target){$targetId=(int)$target['id'];run($db,"UPDATE homeworks SET title=?,subject=?,description=?,due_date=?,max_score=?,updated_at=strftime('%Y-%m-%dT%H:%M:%SZ','now') WHERE id=?",[$title,$subject,$description,$due,$total,$targetId]);foreach($questions as $question){run($db,'UPDATE homework_questions SET title=?,prompt=?,correct_answer=?,explanation=?,max_score=?,auto_correct=NULL,awarded_score=CASE WHEN awarded_score>? THEN ? ELSE awarded_score END WHERE homework_id=? AND position=?',[$question['title'],$question['prompt'],$question['correct_answer'],$question['explanation'],$question['max_score'],$question['max_score'],$question['max_score'],$targetId,$question['position']]);}run($db,"UPDATE homeworks SET score=(SELECT COALESCE(SUM(awarded_score),0) FROM homework_questions WHERE homework_id=?) WHERE id=? AND status='done'",[$targetId,$targetId]);}$db->exec('COMMIT');}catch(Throwable $error){if($db->inTransaction())$db->exec('ROLLBACK');throw $error;}
         reply(['ok'=>true,'count'=>count($targets)]);
+    }
+    if ($action === 'homework_recipients_update') {
+        requireAdmin($user);$id=idValue($data,'id');
+        $source=run($db,'SELECT * FROM homeworks WHERE id=? AND created_by=? AND deleted_at IS NULL',[$id,$user['id']])->fetch();if(!$source)fail('Домашняя работа не найдена.',404);
+        $rawStudents=$data['student_ids']??null;if(!is_array($rawStudents)||!$rawStudents||count($rawStudents)>200)fail('Выберите от 1 до 200 учеников.');
+        $studentIds=[];foreach($rawStudents as $raw){$studentId=filter_var($raw,FILTER_VALIDATE_INT);if($studentId===false||$studentId<1)fail('Некорректный ученик.');$studentIds[]=(int)$studentId;}$studentIds=array_values(array_unique($studentIds));
+        $current=!empty($source['group_id'])?run($db,'SELECT h.*,u.name AS student_name FROM homeworks h JOIN users u ON u.id=h.student_id WHERE h.group_id=? AND h.created_by=? AND h.deleted_at IS NULL ORDER BY h.id',[$source['group_id'],$user['id']])->fetchAll():[array_merge($source,['student_name'=>(string)run($db,'SELECT name FROM users WHERE id=?',[$source['student_id']])->fetchColumn()])];
+        $currentByStudent=[];foreach($current as $item)$currentByStudent[(int)$item['student_id']]=$item;
+        $marks=implode(',',array_fill(0,count($studentIds),'?'));$found=run($db,"SELECT id,active FROM users WHERE id IN ($marks) AND role='student' AND deleted_at IS NULL",$studentIds)->fetchAll();if(count($found)!==count($studentIds))fail('Один из учеников не найден.',404);
+        foreach($found as $student){$studentId=(int)$student['id'];if(!(int)$student['active']&&!isset($currentByStudent[$studentId]))fail('Нельзя назначить работу ученику с приостановленным доступом.',409);}
+        $selected=array_fill_keys($studentIds,true);$blocked=[];
+        foreach($current as $item){$studentId=(int)$item['student_id'];if(isset($selected[$studentId]))continue;$progress=(int)run($db,"SELECT COUNT(*) FROM homework_questions q WHERE q.homework_id=? AND (trim(q.answer_text)<>'' OR trim(q.code_text)<>'' OR EXISTS(SELECT 1 FROM homework_files f WHERE f.question_id=q.id AND f.deleted=0))",[$item['id']])->fetchColumn();if($item['status']!=='assigned'||$progress>0)$blocked[]=$item['student_name'];}
+        if($blocked)fail('Нельзя снять работу: '.implode(', ',$blocked).' уже начал(а) выполнение. Ответы и файлы сохранены.',409);
+        $templateQuestions=run($db,'SELECT bank_item_id,position,title,prompt,correct_answer,explanation,max_score FROM homework_questions WHERE homework_id=? ORDER BY position',[$id])->fetchAll();if(!$templateQuestions)fail('В домашней работе нет заданий.',409);
+        $groupId=count($studentIds)>1?($source['group_id']?:bin2hex(random_bytes(12))):null;$ids=[];$added=0;$removed=0;
+        $db->exec('BEGIN IMMEDIATE');try{
+            foreach($current as $item){$studentId=(int)$item['student_id'];if(isset($selected[$studentId])){run($db,"UPDATE homeworks SET group_id=?,updated_at=strftime('%Y-%m-%dT%H:%M:%SZ','now') WHERE id=?",[$groupId,$item['id']]);}else{run($db,"UPDATE homeworks SET deleted_at=strftime('%Y-%m-%dT%H:%M:%SZ','now'),updated_at=strftime('%Y-%m-%dT%H:%M:%SZ','now') WHERE id=?",[$item['id']]);$removed++;}}
+            foreach($studentIds as $studentId){if(isset($currentByStudent[$studentId])){$ids[]=(int)$currentByStudent[$studentId]['id'];continue;}run($db,'INSERT INTO homeworks(student_id,created_by,group_id,title,subject,description,due_date,max_score) VALUES(?,?,?,?,?,?,?,?)',[$studentId,$user['id'],$groupId,$source['title'],$source['subject'],$source['description'],$source['due_date'],$source['max_score']]);$newId=(int)$db->lastInsertId();$ids[]=$newId;$added++;foreach($templateQuestions as $question)run($db,'INSERT INTO homework_questions(homework_id,bank_item_id,position,title,prompt,correct_answer,explanation,max_score) VALUES(?,?,?,?,?,?,?,?)',[$newId,$question['bank_item_id'],$question['position'],$question['title'],$question['prompt'],$question['correct_answer'],$question['explanation'],$question['max_score']]);}
+            $db->exec('COMMIT');
+        }catch(Throwable $error){if($db->inTransaction())$db->exec('ROLLBACK');throw $error;}
+        reply(['ok'=>true,'id'=>$ids[0],'ids'=>$ids,'count'=>count($ids),'group_id'=>$groupId,'added'=>$added,'removed'=>$removed]);
     }
     if ($action === 'homework_save_progress') {
         if($user['role']!=='student')fail('Ответы сохраняет ученик.',403);$id=idValue($data,'id');
