@@ -126,6 +126,9 @@ try {
     CREATE INDEX IF NOT EXISTS idx_homework_files_question ON homework_files(question_id,deleted);
     CREATE TABLE IF NOT EXISTS meetings (id INTEGER PRIMARY KEY, teacher_id INTEGER NOT NULL REFERENCES users(id), student_id INTEGER NOT NULL REFERENCES users(id), room_name TEXT NOT NULL UNIQUE, room_url TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'active' CHECK(status IN ('active','ended')), expires_at INTEGER NOT NULL, created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now')), ended_at TEXT);
     CREATE INDEX IF NOT EXISTS idx_meetings_student_status ON meetings(student_id,status,expires_at DESC);
+    CREATE TABLE IF NOT EXISTS whiteboards (id INTEGER PRIMARY KEY, teacher_id INTEGER NOT NULL REFERENCES users(id), student_id INTEGER NOT NULL REFERENCES users(id), title TEXT NOT NULL, board_key TEXT NOT NULL UNIQUE, created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now')), updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now')), deleted_at TEXT);
+    CREATE INDEX IF NOT EXISTS idx_whiteboards_teacher_student ON whiteboards(teacher_id,student_id,deleted_at,updated_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_whiteboards_student ON whiteboards(student_id,deleted_at,updated_at DESC);
     CREATE TABLE IF NOT EXISTS attempts (key TEXT PRIMARY KEY, count INTEGER NOT NULL, until INTEGER NOT NULL);");
     $userColumns = array_column($db->query('PRAGMA table_info(users)')->fetchAll(),'name');
     if (!in_array('deleted_at',$userColumns,true)) $db->exec('ALTER TABLE users ADD COLUMN deleted_at TEXT');
@@ -166,7 +169,7 @@ try {
     if (!$user) $user = restoreRemember($db,$rememberCookie,$secure);
     if ($user) $_SESSION['last_seen'] = time();
     if ($action === 'bootstrap' && $method === 'GET') reply(['installed'=>$installed,'user'=>$user ? publicUser($user) : null,'csrf'=>$_SESSION['csrf']]);
-    if ($method !== 'POST' && !in_array($action,['state','download','preview','classwork_state','classwork_download','classwork_preview','editor_state','editor_file','bank_state','bank_file_download','bank_file_view','homework_detail','homework_file_download','meeting_state'],true)) fail('Используйте POST.',405);
+    if ($method !== 'POST' && !in_array($action,['state','download','preview','classwork_state','classwork_download','classwork_preview','editor_state','editor_file','bank_state','bank_file_download','bank_file_view','homework_detail','homework_file_download','meeting_state','whiteboard_state'],true)) fail('Используйте POST.',405);
     if ($action === 'login' || $action === 'setup') {
         $remember = $data['remember'] ?? false;
         if (!is_bool($remember)) fail('Некорректная настройка запоминания входа.');
@@ -203,6 +206,43 @@ try {
         reply(['user'=>publicUser($user),'csrf'=>$_SESSION['csrf']]);
     }
     if (!$user) fail('Войдите в свой кабинет.',401);
+    if (str_starts_with($action,'whiteboard_')) {
+        if($action==='whiteboard_state'){
+            if($user['role']==='admin'){
+                $students=$db->query("SELECT id,name,login,active FROM users WHERE role='student' AND deleted_at IS NULL ORDER BY active DESC,name")->fetchAll();
+                $studentId=filter_input(INPUT_GET,'student_id',FILTER_VALIDATE_INT)?:((int)($students[0]['id']??0));
+                if($studentId&&!run($db,"SELECT id FROM users WHERE id=? AND role='student' AND deleted_at IS NULL",[$studentId])->fetch())fail('Ученик не найден.',404);
+                $boards=$studentId?run($db,"SELECT id,student_id,title,created_at,updated_at FROM whiteboards WHERE teacher_id=? AND student_id=? AND deleted_at IS NULL ORDER BY updated_at DESC,id DESC",[$user['id'],$studentId])->fetchAll():[];
+                reply(['user'=>publicUser($user),'students'=>$students,'student_id'=>$studentId,'boards'=>$boards,'csrf'=>$_SESSION['csrf']]);
+            }
+            $boards=run($db,"SELECT id,student_id,title,created_at,updated_at FROM whiteboards WHERE student_id=? AND deleted_at IS NULL ORDER BY updated_at DESC,id DESC",[$user['id']])->fetchAll();
+            reply(['user'=>publicUser($user),'students'=>[],'student_id'=>(int)$user['id'],'boards'=>$boards,'csrf'=>$_SESSION['csrf']]);
+        }
+        if($action==='whiteboard_create'){
+            requireAdmin($user);$studentId=idValue($data,'student_id');$title=textValue($data,'title',160,true);
+            $student=run($db,"SELECT id FROM users WHERE id=? AND role='student' AND active=1 AND deleted_at IS NULL",[$studentId])->fetch();if(!$student)fail('Активный ученик не найден.',404);
+            $boardKey='kourage-'.bin2hex(random_bytes(24));
+            run($db,'INSERT INTO whiteboards(teacher_id,student_id,title,board_key) VALUES(?,?,?,?)',[$user['id'],$studentId,$title,$boardKey]);
+            reply(['board'=>['id'=>(int)$db->lastInsertId(),'student_id'=>$studentId,'title'=>$title,'created_at'=>gmdate('Y-m-d\TH:i:s\Z'),'updated_at'=>gmdate('Y-m-d\TH:i:s\Z')]],201);
+        }
+        if($action==='whiteboard_update'){
+            requireAdmin($user);$id=idValue($data,'id');$title=textValue($data,'title',160,true);
+            $board=run($db,'SELECT id FROM whiteboards WHERE id=? AND teacher_id=? AND deleted_at IS NULL',[$id,$user['id']])->fetch();if(!$board)fail('Доска не найдена.',404);
+            run($db,"UPDATE whiteboards SET title=?,updated_at=strftime('%Y-%m-%dT%H:%M:%SZ','now') WHERE id=?",[$title,$id]);reply(['ok'=>true]);
+        }
+        if($action==='whiteboard_delete'){
+            requireAdmin($user);$id=idValue($data,'id');$board=run($db,'SELECT id FROM whiteboards WHERE id=? AND teacher_id=? AND deleted_at IS NULL',[$id,$user['id']])->fetch();if(!$board)fail('Доска не найдена.',404);
+            run($db,"UPDATE whiteboards SET deleted_at=strftime('%Y-%m-%dT%H:%M:%SZ','now'),updated_at=strftime('%Y-%m-%dT%H:%M:%SZ','now') WHERE id=?",[$id]);reply(['ok'=>true]);
+        }
+        if($action==='whiteboard_open'){
+            $id=idValue($data,'id');
+            $board=$user['role']==='admin'?run($db,'SELECT id,title,board_key FROM whiteboards WHERE id=? AND teacher_id=? AND deleted_at IS NULL',[$id,$user['id']])->fetch():run($db,'SELECT id,title,board_key FROM whiteboards WHERE id=? AND student_id=? AND deleted_at IS NULL',[$id,$user['id']])->fetch();
+            if(!$board)fail('Доска недоступна.',404);
+            run($db,"UPDATE whiteboards SET updated_at=strftime('%Y-%m-%dT%H:%M:%SZ','now') WHERE id=?",[$id]);
+            reply(['id'=>(int)$board['id'],'title'=>$board['title'],'url'=>'https://wbo.ophir.dev/boards/'.rawurlencode($board['board_key'])]);
+        }
+        fail('Неизвестное действие.',404);
+    }
     if (str_starts_with($action,'meeting_')) {
         run($db,"UPDATE meetings SET status='ended',ended_at=COALESCE(ended_at,strftime('%Y-%m-%dT%H:%M:%SZ','now')) WHERE status='active' AND expires_at<=?",[time()]);
         if($action==='meeting_state'){

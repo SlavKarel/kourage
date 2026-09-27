@@ -9,8 +9,9 @@ assert files == [
     '.htaccess', 'api.php', 'assets/app.js', 'assets/bank.js', 'assets/builder.js',
     'assets/classwork.js', 'assets/editor.js', 'assets/favicon.svg',
     'assets/homework.js', 'assets/meeting.js', 'assets/python-worker.js', 'assets/style.css',
+    'assets/whiteboard.js',
     'bank.html', 'builder.html', 'classwork.html', 'editor.html',
-    'homework.html', 'index.html', 'meeting.html',
+    'homework.html', 'index.html', 'meeting.html', 'whiteboard.html',
 ]
 with TemporaryDirectory(prefix='kourage-transfer-check-') as folder:
     site = Path(folder) / 'courage'

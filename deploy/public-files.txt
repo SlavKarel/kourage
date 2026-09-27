@@ -10,6 +10,7 @@ assets/homework.js
 assets/meeting.js
 assets/python-worker.js
 assets/style.css
+assets/whiteboard.js
 bank.html
 builder.html
 classwork.html
@@ -17,3 +18,4 @@ editor.html
 homework.html
 index.html
 meeting.html
+whiteboard.html
