@@ -59,28 +59,6 @@ function normalizedAnswer(string $value): string {
     $value = trim((string)preg_replace('/\s+/u',' ',$value));
     return function_exists('mb_strtolower') ? mb_strtolower($value,'UTF-8') : strtolower($value);
 }
-function dailyKey(string $private): string {
-    $environment = getenv('DAILY_API_KEY');
-    if (is_string($environment) && trim($environment) !== '') return trim($environment);
-    $path = $private.'/daily-api-key.txt';
-    return is_file($path) ? trim((string)file_get_contents($path)) : '';
-}
-function dailyRequest(string $private, string $method, string $path, ?array $payload = null, bool $allowNotFound = false): array {
-    $key = dailyKey($private);
-    if (strlen($key) < 20) fail('Видеозвонки ещё не подключены. Добавьте ключ Daily в закрытые настройки сайта.',503);
-    if (!function_exists('curl_init')) fail('На хостинге не включён модуль cURL, необходимый для видеозвонков.',503);
-    $handle = curl_init('https://api.daily.co/v1'.$path);
-    $headers = ['Authorization: Bearer '.$key,'Content-Type: application/json'];
-    curl_setopt_array($handle,[CURLOPT_CUSTOMREQUEST=>$method,CURLOPT_RETURNTRANSFER=>true,CURLOPT_CONNECTTIMEOUT=>10,CURLOPT_TIMEOUT=>20,CURLOPT_HTTPHEADER=>$headers]);
-    if ($payload !== null) curl_setopt($handle,CURLOPT_POSTFIELDS,json_encode($payload,JSON_UNESCAPED_UNICODE|JSON_UNESCAPED_SLASHES));
-    $body = curl_exec($handle);$status=(int)curl_getinfo($handle,CURLINFO_RESPONSE_CODE);$error=curl_error($handle);curl_close($handle);
-    if ($body === false || $error !== '') fail('Не удалось связаться с сервисом видеозвонков.',502);
-    $result = $body === '' ? [] : json_decode($body,true);
-    if (!is_array($result)) $result=[];
-    if ($allowNotFound && $status===404) return $result;
-    if ($status < 200 || $status >= 300) fail('Сервис видеозвонков временно недоступен. Повторите позже.',502);
-    return $result;
-}
 function clearRemember(PDO $db, string $cookieName, bool $secure): void {
     $value = $_COOKIE[$cookieName] ?? '';
     if (is_string($value) && preg_match('/^([a-f0-9]{32})\.([a-f0-9]{64})$/D',$value,$parts)) {
@@ -231,18 +209,17 @@ try {
             if($user['role']==='admin'){
                 $students=$db->query("SELECT id,name,login,active FROM users WHERE role='student' AND deleted_at IS NULL ORDER BY active DESC,name")->fetchAll();
                 $meetings=run($db,"SELECT m.id,m.student_id,m.status,m.expires_at,m.created_at,u.name AS student_name FROM meetings m JOIN users u ON u.id=m.student_id WHERE m.teacher_id=? AND m.status='active' ORDER BY m.created_at DESC",[$user['id']])->fetchAll();
-                reply(['user'=>publicUser($user),'students'=>$students,'meetings'=>$meetings,'configured'=>strlen(dailyKey($private))>=20,'csrf'=>$_SESSION['csrf']]);
+                reply(['user'=>publicUser($user),'students'=>$students,'meetings'=>$meetings,'configured'=>true,'csrf'=>$_SESSION['csrf']]);
             }
             $meeting=run($db,"SELECT m.id,m.status,m.expires_at,m.created_at,u.name AS teacher_name FROM meetings m JOIN users u ON u.id=m.teacher_id WHERE m.student_id=? AND m.status='active' ORDER BY m.id DESC LIMIT 1",[$user['id']])->fetch()?:null;
-            reply(['user'=>publicUser($user),'students'=>[],'meetings'=>$meeting?[$meeting]:[],'configured'=>strlen(dailyKey($private))>=20,'csrf'=>$_SESSION['csrf']]);
+            reply(['user'=>publicUser($user),'students'=>[],'meetings'=>$meeting?[$meeting]:[],'configured'=>true,'csrf'=>$_SESSION['csrf']]);
         }
         if($action==='meeting_create'){
             requireAdmin($user);$studentId=idValue($data,'student_id');
             $student=run($db,"SELECT id,name FROM users WHERE id=? AND role='student' AND active=1 AND deleted_at IS NULL",[$studentId])->fetch();if(!$student)fail('Активный ученик не найден.',404);
             $existing=run($db,"SELECT id,student_id,status,expires_at,created_at FROM meetings WHERE teacher_id=? AND student_id=? AND status='active' ORDER BY id DESC LIMIT 1",[$user['id'],$studentId])->fetch();if($existing)reply(['meeting'=>$existing,'created'=>false]);
-            $roomName='kourage-'.bin2hex(random_bytes(12));$expires=time()+6*60*60;
-            $room=dailyRequest($private,'POST','/rooms',['name'=>$roomName,'privacy'=>'private','properties'=>['exp'=>$expires,'enable_prejoin_ui'=>true,'enable_screenshare'=>true,'enable_chat'=>false,'start_video_off'=>false,'start_audio_off'=>false]]);
-            $roomUrl=$room['url']??'';if(!is_string($roomUrl)||!str_starts_with($roomUrl,'https://'))fail('Сервис видеозвонков не создал комнату.',502);
+            $roomName='Kourage'.bin2hex(random_bytes(16));$expires=time()+6*60*60;
+            $roomUrl='https://meet.jit.si/'.rawurlencode($roomName);
             run($db,'INSERT INTO meetings(teacher_id,student_id,room_name,room_url,expires_at) VALUES(?,?,?,?,?)',[$user['id'],$studentId,$roomName,$roomUrl,$expires]);
             reply(['meeting'=>['id'=>(int)$db->lastInsertId(),'student_id'=>$studentId,'student_name'=>$student['name'],'status'=>'active','expires_at'=>$expires,'created_at'=>gmdate('Y-m-d\TH:i:s\Z')],'created'=>true],201);
         }
@@ -250,13 +227,11 @@ try {
             $id=idValue($data,'id');
             $meeting=$user['role']==='admin'?run($db,"SELECT * FROM meetings WHERE id=? AND teacher_id=? AND status='active' AND expires_at>?",[$id,$user['id'],time()])->fetch():run($db,"SELECT * FROM meetings WHERE id=? AND student_id=? AND status='active' AND expires_at>?",[$id,$user['id'],time()])->fetch();
             if(!$meeting)fail('Встреча завершена или недоступна.',404);$expires=min((int)$meeting['expires_at'],time()+4*60*60);
-            $token=dailyRequest($private,'POST','/meeting-tokens',['properties'=>['room_name'=>$meeting['room_name'],'user_name'=>$user['name'],'is_owner'=>$user['role']==='admin','exp'=>$expires]]);
-            if(!isset($token['token'])||!is_string($token['token']))fail('Не удалось получить доступ к видеозвонку.',502);
-            reply(['id'=>(int)$meeting['id'],'url'=>$meeting['room_url'],'token'=>$token['token'],'expires_at'=>$expires]);
+            $roomUrl='https://meet.jit.si/'.rawurlencode((string)$meeting['room_name']);
+            reply(['id'=>(int)$meeting['id'],'url'=>$roomUrl,'display_name'=>$user['name'],'expires_at'=>$expires]);
         }
         if($action==='meeting_end'){
             requireAdmin($user);$id=idValue($data,'id');$meeting=run($db,"SELECT * FROM meetings WHERE id=? AND teacher_id=? AND status='active'",[$id,$user['id']])->fetch();if(!$meeting)fail('Активная встреча не найдена.',404);
-            dailyRequest($private,'DELETE','/rooms/'.rawurlencode($meeting['room_name']),null,true);
             run($db,"UPDATE meetings SET status='ended',ended_at=strftime('%Y-%m-%dT%H:%M:%SZ','now') WHERE id=?",[$id]);reply(['ok'=>true]);
         }
         fail('Неизвестное действие.',404);

@@ -72,10 +72,4 @@ rsync --recursive --times --checksum --omit-dir-times --delay-updates \
   --rsh="$transport" \
   public_html/ "$destination:courage/public_html/"
 
-if [[ -n "${DAILY_API_KEY:-}" ]]; then
-  printf '%s' "$DAILY_API_KEY" | ssh "${ssh_options[@]}" "$destination" \
-    "umask 077; cat > courage/private/daily-api-key.txt; chmod 600 courage/private/daily-api-key.txt"
-fi
-unset DAILY_API_KEY
-
 echo 'Transfer completed. Previous code versions were saved on the host.'
