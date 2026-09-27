@@ -6,11 +6,11 @@ import subprocess
 root = Path(__file__).resolve().parents[1]
 files = (root / 'deploy/public-files.txt').read_text().splitlines()
 assert files == [
-    'api.php', 'assets/app.js', 'assets/bank.js', 'assets/builder.js',
+    '.htaccess', 'api.php', 'assets/app.js', 'assets/bank.js', 'assets/builder.js',
     'assets/classwork.js', 'assets/editor.js', 'assets/favicon.svg',
-    'assets/homework.js', 'assets/python-worker.js', 'assets/style.css',
+    'assets/homework.js', 'assets/meeting.js', 'assets/python-worker.js', 'assets/style.css',
     'bank.html', 'builder.html', 'classwork.html', 'editor.html',
-    'homework.html', 'index.html',
+    'homework.html', 'index.html', 'meeting.html',
 ]
 with TemporaryDirectory(prefix='kourage-transfer-check-') as folder:
     site = Path(folder) / 'courage'
@@ -21,7 +21,6 @@ with TemporaryDirectory(prefix='kourage-transfer-check-') as folder:
     protected = {
         site / 'private/kourage.sqlite': b'live student data',
         site / 'private/uploads/student.txt': b'live submission',
-        target / '.htaccess': b'custom web server settings',
         target / '.user.ini': b'custom PHP settings',
         target / 'extra.html': b'existing extra page',
     }

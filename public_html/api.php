@@ -59,6 +59,28 @@ function normalizedAnswer(string $value): string {
     $value = trim((string)preg_replace('/\s+/u',' ',$value));
     return function_exists('mb_strtolower') ? mb_strtolower($value,'UTF-8') : strtolower($value);
 }
+function dailyKey(string $private): string {
+    $environment = getenv('DAILY_API_KEY');
+    if (is_string($environment) && trim($environment) !== '') return trim($environment);
+    $path = $private.'/daily-api-key.txt';
+    return is_file($path) ? trim((string)file_get_contents($path)) : '';
+}
+function dailyRequest(string $private, string $method, string $path, ?array $payload = null, bool $allowNotFound = false): array {
+    $key = dailyKey($private);
+    if (strlen($key) < 20) fail('Видеозвонки ещё не подключены. Добавьте ключ Daily в закрытые настройки сайта.',503);
+    if (!function_exists('curl_init')) fail('На хостинге не включён модуль cURL, необходимый для видеозвонков.',503);
+    $handle = curl_init('https://api.daily.co/v1'.$path);
+    $headers = ['Authorization: Bearer '.$key,'Content-Type: application/json'];
+    curl_setopt_array($handle,[CURLOPT_CUSTOMREQUEST=>$method,CURLOPT_RETURNTRANSFER=>true,CURLOPT_CONNECTTIMEOUT=>10,CURLOPT_TIMEOUT=>20,CURLOPT_HTTPHEADER=>$headers]);
+    if ($payload !== null) curl_setopt($handle,CURLOPT_POSTFIELDS,json_encode($payload,JSON_UNESCAPED_UNICODE|JSON_UNESCAPED_SLASHES));
+    $body = curl_exec($handle);$status=(int)curl_getinfo($handle,CURLINFO_RESPONSE_CODE);$error=curl_error($handle);curl_close($handle);
+    if ($body === false || $error !== '') fail('Не удалось связаться с сервисом видеозвонков.',502);
+    $result = $body === '' ? [] : json_decode($body,true);
+    if (!is_array($result)) $result=[];
+    if ($allowNotFound && $status===404) return $result;
+    if ($status < 200 || $status >= 300) fail('Сервис видеозвонков временно недоступен. Повторите позже.',502);
+    return $result;
+}
 function clearRemember(PDO $db, string $cookieName, bool $secure): void {
     $value = $_COOKIE[$cookieName] ?? '';
     if (is_string($value) && preg_match('/^([a-f0-9]{32})\.([a-f0-9]{64})$/D',$value,$parts)) {
@@ -124,6 +146,8 @@ try {
     CREATE INDEX IF NOT EXISTS idx_homework_questions_homework ON homework_questions(homework_id,position);
     CREATE TABLE IF NOT EXISTS homework_files (id INTEGER PRIMARY KEY, question_id INTEGER NOT NULL REFERENCES homework_questions(id), uploader_id INTEGER NOT NULL REFERENCES users(id), name TEXT NOT NULL, storage_name TEXT NOT NULL UNIQUE, size INTEGER NOT NULL, deleted INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now')));
     CREATE INDEX IF NOT EXISTS idx_homework_files_question ON homework_files(question_id,deleted);
+    CREATE TABLE IF NOT EXISTS meetings (id INTEGER PRIMARY KEY, teacher_id INTEGER NOT NULL REFERENCES users(id), student_id INTEGER NOT NULL REFERENCES users(id), room_name TEXT NOT NULL UNIQUE, room_url TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'active' CHECK(status IN ('active','ended')), expires_at INTEGER NOT NULL, created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now')), ended_at TEXT);
+    CREATE INDEX IF NOT EXISTS idx_meetings_student_status ON meetings(student_id,status,expires_at DESC);
     CREATE TABLE IF NOT EXISTS attempts (key TEXT PRIMARY KEY, count INTEGER NOT NULL, until INTEGER NOT NULL);");
     $userColumns = array_column($db->query('PRAGMA table_info(users)')->fetchAll(),'name');
     if (!in_array('deleted_at',$userColumns,true)) $db->exec('ALTER TABLE users ADD COLUMN deleted_at TEXT');
@@ -164,7 +188,7 @@ try {
     if (!$user) $user = restoreRemember($db,$rememberCookie,$secure);
     if ($user) $_SESSION['last_seen'] = time();
     if ($action === 'bootstrap' && $method === 'GET') reply(['installed'=>$installed,'user'=>$user ? publicUser($user) : null,'csrf'=>$_SESSION['csrf']]);
-    if ($method !== 'POST' && !in_array($action,['state','download','preview','classwork_state','classwork_download','classwork_preview','editor_state','editor_file','bank_state','bank_file_download','bank_file_view','homework_detail','homework_file_download'],true)) fail('Используйте POST.',405);
+    if ($method !== 'POST' && !in_array($action,['state','download','preview','classwork_state','classwork_download','classwork_preview','editor_state','editor_file','bank_state','bank_file_download','bank_file_view','homework_detail','homework_file_download','meeting_state'],true)) fail('Используйте POST.',405);
     if ($action === 'login' || $action === 'setup') {
         $remember = $data['remember'] ?? false;
         if (!is_bool($remember)) fail('Некорректная настройка запоминания входа.');
@@ -201,6 +225,42 @@ try {
         reply(['user'=>publicUser($user),'csrf'=>$_SESSION['csrf']]);
     }
     if (!$user) fail('Войдите в свой кабинет.',401);
+    if (str_starts_with($action,'meeting_')) {
+        run($db,"UPDATE meetings SET status='ended',ended_at=COALESCE(ended_at,strftime('%Y-%m-%dT%H:%M:%SZ','now')) WHERE status='active' AND expires_at<=?",[time()]);
+        if($action==='meeting_state'){
+            if($user['role']==='admin'){
+                $students=$db->query("SELECT id,name,login,active FROM users WHERE role='student' AND deleted_at IS NULL ORDER BY active DESC,name")->fetchAll();
+                $meetings=run($db,"SELECT m.id,m.student_id,m.status,m.expires_at,m.created_at,u.name AS student_name FROM meetings m JOIN users u ON u.id=m.student_id WHERE m.teacher_id=? AND m.status='active' ORDER BY m.created_at DESC",[$user['id']])->fetchAll();
+                reply(['user'=>publicUser($user),'students'=>$students,'meetings'=>$meetings,'configured'=>strlen(dailyKey($private))>=20,'csrf'=>$_SESSION['csrf']]);
+            }
+            $meeting=run($db,"SELECT m.id,m.status,m.expires_at,m.created_at,u.name AS teacher_name FROM meetings m JOIN users u ON u.id=m.teacher_id WHERE m.student_id=? AND m.status='active' ORDER BY m.id DESC LIMIT 1",[$user['id']])->fetch()?:null;
+            reply(['user'=>publicUser($user),'students'=>[],'meetings'=>$meeting?[$meeting]:[],'configured'=>strlen(dailyKey($private))>=20,'csrf'=>$_SESSION['csrf']]);
+        }
+        if($action==='meeting_create'){
+            requireAdmin($user);$studentId=idValue($data,'student_id');
+            $student=run($db,"SELECT id,name FROM users WHERE id=? AND role='student' AND active=1 AND deleted_at IS NULL",[$studentId])->fetch();if(!$student)fail('Активный ученик не найден.',404);
+            $existing=run($db,"SELECT id,student_id,status,expires_at,created_at FROM meetings WHERE teacher_id=? AND student_id=? AND status='active' ORDER BY id DESC LIMIT 1",[$user['id'],$studentId])->fetch();if($existing)reply(['meeting'=>$existing,'created'=>false]);
+            $roomName='kourage-'.bin2hex(random_bytes(12));$expires=time()+6*60*60;
+            $room=dailyRequest($private,'POST','/rooms',['name'=>$roomName,'privacy'=>'private','properties'=>['exp'=>$expires,'enable_prejoin_ui'=>true,'enable_screenshare'=>true,'enable_chat'=>false,'start_video_off'=>false,'start_audio_off'=>false]]);
+            $roomUrl=$room['url']??'';if(!is_string($roomUrl)||!str_starts_with($roomUrl,'https://'))fail('Сервис видеозвонков не создал комнату.',502);
+            run($db,'INSERT INTO meetings(teacher_id,student_id,room_name,room_url,expires_at) VALUES(?,?,?,?,?)',[$user['id'],$studentId,$roomName,$roomUrl,$expires]);
+            reply(['meeting'=>['id'=>(int)$db->lastInsertId(),'student_id'=>$studentId,'student_name'=>$student['name'],'status'=>'active','expires_at'=>$expires,'created_at'=>gmdate('Y-m-d\TH:i:s\Z')],'created'=>true],201);
+        }
+        if($action==='meeting_join'){
+            $id=idValue($data,'id');
+            $meeting=$user['role']==='admin'?run($db,"SELECT * FROM meetings WHERE id=? AND teacher_id=? AND status='active' AND expires_at>?",[$id,$user['id'],time()])->fetch():run($db,"SELECT * FROM meetings WHERE id=? AND student_id=? AND status='active' AND expires_at>?",[$id,$user['id'],time()])->fetch();
+            if(!$meeting)fail('Встреча завершена или недоступна.',404);$expires=min((int)$meeting['expires_at'],time()+4*60*60);
+            $token=dailyRequest($private,'POST','/meeting-tokens',['properties'=>['room_name'=>$meeting['room_name'],'user_name'=>$user['name'],'is_owner'=>$user['role']==='admin','exp'=>$expires]]);
+            if(!isset($token['token'])||!is_string($token['token']))fail('Не удалось получить доступ к видеозвонку.',502);
+            reply(['id'=>(int)$meeting['id'],'url'=>$meeting['room_url'],'token'=>$token['token'],'expires_at'=>$expires]);
+        }
+        if($action==='meeting_end'){
+            requireAdmin($user);$id=idValue($data,'id');$meeting=run($db,"SELECT * FROM meetings WHERE id=? AND teacher_id=? AND status='active'",[$id,$user['id']])->fetch();if(!$meeting)fail('Активная встреча не найдена.',404);
+            dailyRequest($private,'DELETE','/rooms/'.rawurlencode($meeting['room_name']),null,true);
+            run($db,"UPDATE meetings SET status='ended',ended_at=strftime('%Y-%m-%dT%H:%M:%SZ','now') WHERE id=?",[$id]);reply(['ok'=>true]);
+        }
+        fail('Неизвестное действие.',404);
+    }
     if (in_array($action,['upload','download','preview','remove_attachment'],true)) {
         $attachment = null;
         if ($action !== 'upload') {
@@ -461,11 +521,11 @@ try {
         $studentIds=[];foreach($rawStudents as $raw){$id=filter_var($raw,FILTER_VALIDATE_INT);if($id===false||$id<1)fail('Некорректный ученик.');$studentIds[]=(int)$id;}$studentIds=array_values(array_unique($studentIds));
         $marks=implode(',',array_fill(0,count($studentIds),'?'));$found=run($db,"SELECT id FROM users WHERE id IN ($marks) AND role='student' AND active=1 AND deleted_at IS NULL",$studentIds)->fetchAll();if(count($found)!==count($studentIds))fail('Один из учеников не найден или его доступ приостановлен.',404);
         $rawQuestions=$data['questions']??null;if(!is_array($rawQuestions)||!$rawQuestions||count($rawQuestions)>30)fail('В домашней работе должно быть от 1 до 30 заданий.');
-        $questions=[];$total=0;
+        $questions=[];$total=0;$seenBankItems=[];
         foreach($rawQuestions as $index=>$raw){
             if(!is_array($raw))fail('Некорректное задание.');
             $bankId=isset($raw['bank_item_id'])&&$raw['bank_item_id']!==''?filter_var($raw['bank_item_id'],FILTER_VALIDATE_INT):null;
-            if($bankId){$item=run($db,'SELECT * FROM question_bank WHERE id=? AND teacher_id=? AND deleted_at IS NULL',[(int)$bankId,$user['id']])->fetch();if(!$item)fail('Одно из заданий банка больше недоступно.',404);$q=['bank_item_id'=>(int)$item['id'],'title'=>$item['title'],'prompt'=>$item['prompt'],'correct_answer'=>$item['correct_answer'],'explanation'=>$item['explanation'],'max_score'=>(int)$item['default_score']];}
+            if($bankId){if(isset($seenBankItems[(int)$bankId]))fail('Одно задание банка нельзя добавить в домашнюю работу дважды.');$seenBankItems[(int)$bankId]=true;$item=run($db,'SELECT * FROM question_bank WHERE id=? AND teacher_id=? AND deleted_at IS NULL',[(int)$bankId,$user['id']])->fetch();if(!$item)fail('Одно из заданий банка больше недоступно.',404);$q=['bank_item_id'=>(int)$item['id'],'title'=>$item['title'],'prompt'=>$item['prompt'],'correct_answer'=>$item['correct_answer'],'explanation'=>$item['explanation'],'max_score'=>(int)$item['default_score']];}
             else{$q=['bank_item_id'=>null,'title'=>textValue($raw,'title',250,true),'prompt'=>textValue($raw,'prompt',30000,true),'correct_answer'=>textValue($raw,'correct_answer',5000,true),'explanation'=>textValue($raw,'explanation',15000)];$q['max_score']=filter_var($raw['max_score']??null,FILTER_VALIDATE_INT);if($q['max_score']===false||$q['max_score']<1||$q['max_score']>1000)fail('Проверьте баллы у заданий.');}
             $q['position']=$index+1;$total+=(int)$q['max_score'];$questions[]=$q;
         }
@@ -484,6 +544,21 @@ try {
         if($bankIds){$marks=implode(',',array_fill(0,count($bankIds),'?'));$materials=run($db,"SELECT id,bank_item_id,name,size,mime FROM question_bank_files WHERE deleted=0 AND bank_item_id IN ($marks) ORDER BY id",$bankIds)->fetchAll();foreach($materials as $material)$materialsByBank[$material['bank_item_id']][]=$material;}
         foreach($questions as &$question){$question['files']=$byQuestion[$question['id']]??[];$question['materials']=$materialsByBank[$question['bank_item_id']]??[];if($user['role']!=='admin'&&$homework['status']!=='done'){unset($question['correct_answer'],$question['explanation']);}}unset($question);
         reply(['user'=>publicUser($user),'homework'=>$homework,'questions'=>$questions,'csrf'=>$_SESSION['csrf']]);
+    }
+    if ($action === 'homework_edit') {
+        requireAdmin($user);$id=idValue($data,'id');
+        $source=run($db,'SELECT * FROM homeworks WHERE id=? AND created_by=? AND deleted_at IS NULL',[$id,$user['id']])->fetch();if(!$source)fail('Домашняя работа не найдена.',404);
+        $title=textValue($data,'title',250,true);$subject=textValue($data,'subject',100,true);$description=textValue($data,'description',10000);$due=validDate(textValue($data,'due_date',10));
+        $rawQuestions=$data['questions']??null;if(!is_array($rawQuestions)||!$rawQuestions||count($rawQuestions)>30)fail('В домашней работе должно быть от 1 до 30 заданий.');
+        $existing=run($db,'SELECT id,position FROM homework_questions WHERE homework_id=? ORDER BY position',[$id])->fetchAll();if(count($existing)!==count($rawQuestions))fail('Состав работы изменился. Обновите страницу.');
+        $positionById=[];foreach($existing as $item)$positionById[(int)$item['id']]=(int)$item['position'];$questions=[];$seen=[];$total=0;
+        foreach($rawQuestions as $raw){if(!is_array($raw))fail('Некорректное задание.');$questionId=filter_var($raw['id']??null,FILTER_VALIDATE_INT);if($questionId===false||!isset($positionById[(int)$questionId])||isset($seen[(int)$questionId]))fail('Состав работы изменился. Обновите страницу.');$seen[(int)$questionId]=true;
+            $score=filter_var($raw['max_score']??null,FILTER_VALIDATE_INT);if($score===false||$score<1||$score>1000)fail('Проверьте баллы у заданий.');$questions[]=['position'=>$positionById[(int)$questionId],'title'=>textValue($raw,'title',250,true),'prompt'=>textValue($raw,'prompt',30000,true),'correct_answer'=>textValue($raw,'correct_answer',5000,true),'explanation'=>textValue($raw,'explanation',15000),'max_score'=>(int)$score];$total+=(int)$score;
+        }
+        if(count($seen)!==count($existing)||$total>10000)fail('Проверьте состав и баллы домашней работы.');
+        $targets=!empty($source['group_id'])?run($db,'SELECT id FROM homeworks WHERE group_id=? AND created_by=? AND deleted_at IS NULL',[$source['group_id'],$user['id']])->fetchAll():[['id'=>$id]];
+        $db->exec('BEGIN IMMEDIATE');try{foreach($targets as $target){$targetId=(int)$target['id'];run($db,"UPDATE homeworks SET title=?,subject=?,description=?,due_date=?,max_score=?,updated_at=strftime('%Y-%m-%dT%H:%M:%SZ','now') WHERE id=?",[$title,$subject,$description,$due,$total,$targetId]);foreach($questions as $question){run($db,'UPDATE homework_questions SET title=?,prompt=?,correct_answer=?,explanation=?,max_score=?,auto_correct=NULL,awarded_score=CASE WHEN awarded_score>? THEN ? ELSE awarded_score END WHERE homework_id=? AND position=?',[$question['title'],$question['prompt'],$question['correct_answer'],$question['explanation'],$question['max_score'],$question['max_score'],$question['max_score'],$targetId,$question['position']]);}run($db,"UPDATE homeworks SET score=(SELECT COALESCE(SUM(awarded_score),0) FROM homework_questions WHERE homework_id=?) WHERE id=? AND status='done'",[$targetId,$targetId]);}$db->exec('COMMIT');}catch(Throwable $error){if($db->inTransaction())$db->exec('ROLLBACK');throw $error;}
+        reply(['ok'=>true,'count'=>count($targets)]);
     }
     if ($action === 'homework_save_progress') {
         if($user['role']!=='student')fail('Ответы сохраняет ученик.',403);$id=idValue($data,'id');
@@ -528,7 +603,8 @@ try {
         $byTask=[]; foreach ($files as $file) $byTask[$file['task_id']][]=$file;
         foreach ($tasks as &$item) $item['attachments']=$byTask[$item['id']] ?? [];
         unset($item);
-        reply(['user'=>publicUser($user),'students'=>$students,'tasks'=>$tasks,'homeworks'=>$homeworks]);
+        $meeting=$user['role']==='student'?run($db,"SELECT id,status,expires_at,created_at FROM meetings WHERE student_id=? AND status='active' AND expires_at>? ORDER BY id DESC LIMIT 1",[$user['id'],time()])->fetch()?:null:null;
+        reply(['user'=>publicUser($user),'students'=>$students,'tasks'=>$tasks,'homeworks'=>$homeworks,'meeting'=>$meeting]);
     }
     if ($action === 'change_password') {
         $old = textValue($data,'old_password',72,true);

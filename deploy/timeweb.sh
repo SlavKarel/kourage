@@ -22,10 +22,11 @@ node --check public_html/assets/builder.js
 node --check public_html/assets/classwork.js
 node --check public_html/assets/editor.js
 node --check public_html/assets/homework.js
+node --check public_html/assets/meeting.js
 node --check public_html/assets/python-worker.js
 
 # An explicit list prevents unrelated uploaded files or live data being sent.
-expected=$'api.php\nassets/app.js\nassets/bank.js\nassets/builder.js\nassets/classwork.js\nassets/editor.js\nassets/favicon.svg\nassets/homework.js\nassets/python-worker.js\nassets/style.css\nbank.html\nbuilder.html\nclasswork.html\neditor.html\nhomework.html\nindex.html'
+expected=$'.htaccess\napi.php\nassets/app.js\nassets/bank.js\nassets/builder.js\nassets/classwork.js\nassets/editor.js\nassets/favicon.svg\nassets/homework.js\nassets/meeting.js\nassets/python-worker.js\nassets/style.css\nbank.html\nbuilder.html\nclasswork.html\neditor.html\nhomework.html\nindex.html\nmeeting.html'
 [[ "$(cat deploy/public-files.txt)" == "$expected" ]] || { echo 'Unexpected deployment file list'; exit 1; }
 [[ -d public_html && ! -L public_html && -d public_html/assets && ! -L public_html/assets ]] || exit 1
 while IFS= read -r item; do
@@ -55,7 +56,7 @@ test -d courage/public_html/assets
 test ! -L courage/public_html/assets
 test -f courage/private/kourage.sqlite
 command -v rsync >/dev/null
-for file in api.php index.html bank.html builder.html classwork.html editor.html homework.html assets/app.js assets/bank.js assets/builder.js assets/classwork.js assets/editor.js assets/homework.js assets/python-worker.js assets/style.css assets/favicon.svg; do
+for file in .htaccess api.php index.html bank.html builder.html classwork.html editor.html homework.html meeting.html assets/app.js assets/bank.js assets/builder.js assets/classwork.js assets/editor.js assets/homework.js assets/meeting.js assets/python-worker.js assets/style.css assets/favicon.svg; do
   test ! -L "courage/public_html/$file"
 done
 test ! -L courage/.code-backups
@@ -70,5 +71,11 @@ rsync --recursive --times --checksum --omit-dir-times --delay-updates \
   --files-from=deploy/public-files.txt \
   --rsh="$transport" \
   public_html/ "$destination:courage/public_html/"
+
+if [[ -n "${DAILY_API_KEY:-}" ]]; then
+  printf '%s' "$DAILY_API_KEY" | ssh "${ssh_options[@]}" "$destination" \
+    "umask 077; cat > courage/private/daily-api-key.txt; chmod 600 courage/private/daily-api-key.txt"
+fi
+unset DAILY_API_KEY
 
 echo 'Transfer completed. Previous code versions were saved on the host.'

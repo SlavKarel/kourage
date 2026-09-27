@@ -28,6 +28,7 @@ jobs:
           TIMEWEB_USER: ${{ vars.TIMEWEB_USER }}
           TIMEWEB_SSH_KEY: ${{ secrets.TIMEWEB_SSH_KEY }}
           TIMEWEB_KNOWN_HOSTS: ${{ secrets.TIMEWEB_KNOWN_HOSTS }}
+          DAILY_API_KEY: ${{ secrets.DAILY_API_KEY }}
         run: bash deploy/timeweb.sh
 
       - name: Результат
