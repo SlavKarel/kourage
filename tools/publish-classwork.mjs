@@ -5,7 +5,7 @@ import { File } from 'node:buffer';
 import { createInterface } from 'node:readline/promises';
 import { stdin, stdout } from 'node:process';
 
-const allowed=new Set(['xlsx','xls','csv','txt','md','py','js','ts','jsx','tsx','html','css','json','xml','yaml','yml','sql','java','c','cpp','h','hpp','cs','go','rs','php','sh','ini','toml']);
+const allowed=new Set(['xlsx','xls','ods','csv','txt','md','py','js','ts','jsx','tsx','html','css','json','xml','yaml','yml','sql','java','c','cpp','h','hpp','cs','go','rs','php','sh','ini','toml']);
 const ignored=new Set(['.git','.vscode','node_modules','__pycache__','.pytest_cache']);
 const [siteArg,studentLogin,folderArg]=process.argv.slice(2);
 if(!siteArg||!studentLogin||!folderArg){console.error('Использование: node tools/publish-classwork.mjs https://kourage.ru логин_ученика ./папка');process.exit(1);}

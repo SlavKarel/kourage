@@ -42,4 +42,4 @@ node tools/publish-assignment.mjs https://co916506.tw1.ru 42 ./assignments/lesso
 
 Номер задания виден на карточке как `Задание #42`. Сценарий попросит логин и пароль преподавателя. Пароль никуда не записывается. Нужен Node.js 20 или новее.
 
-Поддерживаются файлы кода, TXT, Markdown, CSV, JSON, XML, YAML, SQL и Excel. Скрытые папки, `.git`, `.vscode`, `node_modules` и `__pycache__` пропускаются. Ограничения сайта: до 20 файлов и до 10 МБ на файл.
+Поддерживаются файлы кода, TXT, Markdown, CSV, JSON, XML, YAML, SQL, Excel и ODS. Скрытые папки, `.git`, `.vscode`, `node_modules` и `__pycache__` пропускаются. Ограничения сайта: до 20 файлов и до 10 МБ на файл.
