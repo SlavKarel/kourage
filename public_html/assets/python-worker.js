@@ -2,24 +2,37 @@ importScripts('https://cdn.jsdelivr.net/pyodide/v0.27.7/full/pyodide.js');
 
 const indexURL='https://cdn.jsdelivr.net/pyodide/v0.27.7/full/';
 let runtimePromise;
+let turtleSourcePromise;
 async function runtime(){
   if(!runtimePromise)runtimePromise=loadPyodide({indexURL});
   return runtimePromise;
 }
+async function turtleSource(){
+  if(!turtleSourcePromise)turtleSourcePromise=fetch(new URL('kourage-turtle.py?v=1',self.location.href)).then(response=>{if(!response.ok)throw new Error('Не удалось загрузить поддержку turtle.');return response.text();});
+  return turtleSourcePromise;
+}
+function emitTurtle(pyodide){
+  if(!pyodide)return;
+  try{const module=pyodide.pyimport('turtle'),svg=String(module._kourage_svg());module.destroy?.();if(svg)self.postMessage({type:'turtle',value:svg});}catch{}
+}
 self.onmessage=async event=>{
   if(event.data?.type!=='run')return;
+  let pyodide;
   try{
-    const pyodide=await runtime();
+    pyodide=await runtime();
     pyodide.setStdout({batched:value=>self.postMessage({type:'stdout',value:value+'\n'})});
     pyodide.setStderr({batched:value=>self.postMessage({type:'stderr',value:value+'\n'})});
     const workspace='/home/pyodide/workspace';
     pyodide.FS.mkdirTree(workspace);
     const cleanPath=value=>String(value||'').replace(/\\/g,'/').split('/').filter(part=>part&&part!=='.'&&part!=='..').join('/');
+    pyodide.FS.writeFile(workspace+'/turtle.py',await turtleSource(),{encoding:'utf8'});
     for(const file of Array.isArray(event.data.files)?event.data.files:[]){const relative=cleanPath(file.path);if(!relative)continue;const parts=relative.split('/');parts.pop();if(parts.length)pyodide.FS.mkdirTree(workspace+'/'+parts.join('/'));pyodide.FS.writeFile(workspace+'/'+relative,String(file.content||''),{encoding:'utf8'});}
     const mainPath=cleanPath(event.data.filename)||'main.py',mainParts=mainPath.split('/'),mainName=mainParts.pop()||'main.py',mainDirectory=workspace+(mainParts.length?'/'+mainParts.join('/'):'');
     pyodide.FS.mkdirTree(mainDirectory);pyodide.FS.writeFile(mainDirectory+'/'+mainName,String(event.data.code||''),{encoding:'utf8'});pyodide.FS.chdir(mainDirectory);
+    pyodide.runPython("import sys; sys.modules.pop('turtle', None)");
     await pyodide.loadPackagesFromImports(String(event.data.code||''));
     await pyodide.runPythonAsync(String(event.data.code||''),{filename:mainName});
+    emitTurtle(pyodide);
     self.postMessage({type:'done'});
-  }catch(error){self.postMessage({type:'error',value:String(error?.message||error)});}
+  }catch(error){emitTurtle(pyodide);self.postMessage({type:'error',value:String(error?.message||error)});}
 };
