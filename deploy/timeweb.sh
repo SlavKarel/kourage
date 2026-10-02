@@ -27,7 +27,7 @@ node --check public_html/assets/python-worker.js
 node --check public_html/assets/whiteboard.js
 
 # An explicit list prevents unrelated uploaded files or live data being sent.
-expected=$'.htaccess\napi.php\nassets/app.js\nassets/bank.js\nassets/builder.js\nassets/classwork.js\nassets/editor.js\nassets/favicon.svg\nassets/homework.js\nassets/meeting.js\nassets/python-worker.js\nassets/style.css\nassets/whiteboard.js\nbank.html\nbuilder.html\nclasswork.html\neditor.html\nhomework.html\nindex.html\nmeeting.html\nwhiteboard.html'
+expected=$'.htaccess\napi.php\nassets/app.js\nassets/bank.js\nassets/builder.js\nassets/classwork.js\nassets/editor.js\nassets/favicon.svg\nassets/homework.js\nassets/kourage-turtle.txt\nassets/meeting.js\nassets/python-worker.js\nassets/style.css\nassets/whiteboard.js\nbank.html\nbuilder.html\nclasswork.html\neditor.html\nhomework.html\nindex.html\nmeeting.html\nwhiteboard.html'
 [[ "$(cat deploy/public-files.txt)" == "$expected" ]] || { echo 'Unexpected deployment file list'; exit 1; }
 [[ -d public_html && ! -L public_html && -d public_html/assets && ! -L public_html/assets ]] || exit 1
 while IFS= read -r item; do
@@ -57,7 +57,7 @@ test -d courage/public_html/assets
 test ! -L courage/public_html/assets
 test -f courage/private/kourage.sqlite
 command -v rsync >/dev/null
-for file in .htaccess api.php index.html bank.html builder.html classwork.html editor.html homework.html meeting.html whiteboard.html assets/app.js assets/bank.js assets/builder.js assets/classwork.js assets/editor.js assets/homework.js assets/meeting.js assets/python-worker.js assets/style.css assets/whiteboard.js assets/favicon.svg; do
+for file in .htaccess api.php index.html bank.html builder.html classwork.html editor.html homework.html meeting.html whiteboard.html assets/app.js assets/bank.js assets/builder.js assets/classwork.js assets/editor.js assets/homework.js assets/kourage-turtle.txt assets/meeting.js assets/python-worker.js assets/style.css assets/whiteboard.js assets/favicon.svg; do
   test ! -L "courage/public_html/$file"
 done
 test ! -L courage/.code-backups

@@ -7,6 +7,7 @@ assets/classwork.js
 assets/editor.js
 assets/favicon.svg
 assets/homework.js
+assets/kourage-turtle.txt
 assets/meeting.js
 assets/python-worker.js
 assets/style.css
