@@ -3,7 +3,7 @@ const $ = (s, root = document) => root.querySelector(s);
 const $$ = (s, root = document) => Array.from(root.querySelectorAll(s));
 const app = $('#app'), modal = $('#modal');
 const pageParams = new URLSearchParams(location.search), demo = pageParams.has('demo');
-let csrf = '', user = null, students = [], tasks = [], homeworks = [], meeting = null, view = ['students','history'].includes(pageParams.get('view')) ? pageParams.get('view') : 'tasks', filter = 'all', search = '', studentFilter = '', toastTimer;
+let csrf = '', user = null, students = [], tasks = [], homeworks = [], meeting = null, view = ['students','history'].includes(pageParams.get('view')) ? pageParams.get('view') : 'tasks', filter = 'all', search = '', studentFilter = '', toastTimer, starting = false;
 const statusNames = {assigned:'К выполнению', submitted:'На проверке', revision:'На доработку', done:'Выполнено'};
 const esc = value => String(value ?? '').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const icons = {
@@ -35,15 +35,51 @@ function field(label,name,value='',type='text',extra=''){return `<label class="f
 function area(label,name,value='',extra=''){return `<label class="field">${esc(label)}<textarea name="${name}" ${extra}>${esc(value)}</textarea></label>`;}
 function actions(label,danger=false){return `${errorBox()}<div class="modal-actions"><button type="button" class="btn secondary" data-action="close">Отмена</button><button class="btn ${danger?'danger':''}" type="submit">${label}</button></div>`;}
 
+const wait=ms=>new Promise(resolve=>setTimeout(resolve,ms));
+const retryStatuses=new Set([408,425,429,500,502,503,504]);
 async function api(action,data){
  if(demo)return demoApi(action,data);
- const response=await fetch(`api.php?action=${encodeURIComponent(action)}`,{method:data?'POST':'GET',credentials:'same-origin',headers:data?{'Content-Type':'application/json','X-CSRF-Token':csrf}:{},body:data?JSON.stringify(data):undefined});
- let result;try{result=await response.json();}catch{throw new Error('Сервер не ответил. Для установки нужен PHP-хостинг. Инструкция находится в архиве сайта.');}
- if(!response.ok){if(response.status===401 && action!=='login'){user=null;loginScreen(true);}throw new Error(result.error||'Не удалось выполнить запрос.');}
- if(result.csrf)csrf=result.csrf;return result;
+ const readOnly=data===undefined,delays=[350,800,1500],attempts=readOnly?delays.length+1:1;
+ let lastError=new Error('Сервер временно не ответил. Попробуй ещё раз через несколько секунд.');
+ for(let attempt=0;attempt<attempts;attempt++){
+  const controller=new AbortController(),timeout=setTimeout(()=>controller.abort(),12000);
+  let response;
+  try{
+   response=await fetch(`api.php?action=${encodeURIComponent(action)}`,{method:readOnly?'GET':'POST',credentials:'same-origin',cache:readOnly?'no-store':'default',headers:readOnly?{}:{'Content-Type':'application/json','X-CSRF-Token':csrf},body:readOnly?undefined:JSON.stringify(data),signal:controller.signal});
+  }catch(error){
+   clearTimeout(timeout);
+   lastError=new Error('Сервер временно не ответил. Попробуй ещё раз через несколько секунд.');
+   if(attempt<attempts-1){await wait(delays[attempt]);continue;}
+   throw lastError;
+  }
+  let result;
+  try{result=await response.json();}
+  catch{
+   clearTimeout(timeout);
+   lastError=new Error('Сервер временно не ответил. Попробуй ещё раз через несколько секунд.');
+   if(readOnly&&attempt<attempts-1){await wait(delays[attempt]);continue;}
+   throw lastError;
+  }
+  clearTimeout(timeout);
+  if(!response.ok){
+   if(response.status===401&&action!=='login'){user=null;loginScreen(true);}
+   lastError=new Error(result.error||'Не удалось выполнить запрос.');
+   if(readOnly&&retryStatuses.has(response.status)&&attempt<attempts-1){await wait(delays[attempt]);continue;}
+   throw lastError;
+  }
+  if(result.csrf)csrf=result.csrf;
+  return result;
+ }
+ throw lastError;
 }
 async function refresh(){const data=await api('state');user=data.user;students=data.students;tasks=data.tasks;homeworks=data.homeworks||[];meeting=data.meeting||null;render();}
-async function start(){try{const data=await api('bootstrap');user=data.user;if(user)await refresh();else loginScreen(data.installed);}catch(e){app.innerHTML=`<div class="error-page">${brand}<h1 style="margin-top:32px">Кабинет пока недоступен</h1><p class="muted">${esc(e.message)}</p><button class="btn" data-action="retry">Попробовать снова</button> <a class="btn secondary" href="?demo=1">Посмотреть демо</a></div>`;}}
+async function start(){
+ if(starting)return;
+ starting=true;
+ try{const data=await api('bootstrap');user=data.user;if(user)await refresh();else loginScreen(data.installed);}
+ catch(e){app.innerHTML=`<div class="error-page">${brand}<h1 style="margin-top:32px">Кабинет пока недоступен</h1><p class="muted">${esc(e.message)}</p><button class="btn" data-action="retry">Попробовать снова</button> <a class="btn secondary" href="?demo=1">Посмотреть демо</a></div>`;}
+ finally{starting=false;}
+}
 function loginScreen(installed){app.innerHTML=`<div class="login"><section class="login-story">${brand}<div><div class="eyebrow" style="color:#c9f475">Твой учебный маршрут</div><h1>Каждое задание —<br><span>шаг вперёд.</span></h1><p>Здесь остаются твои решения, новые знания и маленькие победы. Продолжим с того места, где остановились.</p></div><div class="story-note">Kourage · Учимся осмысленно</div></section><section class="login-form-wrap"><form class="login-form" data-form="${installed?'login':'setup'}"><h2>${installed?'С возвращением':'Настроим Kourage'}</h2><p>${installed?'Войди в кабинет, чтобы открыть свои задания.':'Создай учётную запись преподавателя. Это нужно сделать только один раз.'}</p>${!installed?field('Ключ установки','setup_key','','password','required autocomplete="off"')+field('Твоё имя','name','','text','required maxlength="80" autocomplete="name"'):''}${field('Логин','login','','text','required pattern="[A-Za-z0-9._-]{3,64}" autocomplete="username" placeholder="Твой логин"')}${field('Пароль','password','','password',`required ${installed?'':'minlength="6"'} maxlength="72" autocomplete="${installed?'current-password':'new-password'}" placeholder="Твой пароль"`)}${installed?'<label class="check-row remember-row"><input type="checkbox" name="remember" value="1"><span>Запомнить меня на 180 дней</span></label>':''}${errorBox()}<button class="btn" type="submit">${installed?'Войти в кабинет':'Создать кабинет'} ${icon('arrow')}</button><div class="login-hint">${installed?'Логин и пароль выдаёт преподаватель. Если забыл пароль, попроси его создать новый.':'Ключ находится в файле private/setup-key.txt из установочного архива.'}</div><div class="login-hint"><a href="?demo=1">Посмотреть демоверсию</a></div></form></section></div>`;}
 
 function render(){
