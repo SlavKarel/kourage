@@ -40,6 +40,11 @@ function publicUser(array $user): array {
     return array_intersect_key($user, array_flip(['id','name','login','role','active','created_at']));
 }
 function requireAdmin(array $user): void { if ($user['role'] !== 'admin') fail('Доступ только для преподавателя.',403); }
+function requireOwner(PDO $db, array $user): void {
+    requireAdmin($user);
+    $ownerId = (int)$db->query("SELECT MIN(id) FROM users WHERE role='admin' AND deleted_at IS NULL")->fetchColumn();
+    if ((int)$user['id'] !== $ownerId) fail('Добавлять преподавателей может только владелец кабинета.',403);
+}
 function validLink(string $url): string {
     if ($url !== '' && (!filter_var($url, FILTER_VALIDATE_URL) || !in_array(strtolower((string)parse_url($url,PHP_URL_SCHEME)), ['http','https'],true))) fail('Укажите ссылку, начинающуюся с https:// или http://.');
     return $url;
@@ -665,11 +670,13 @@ try {
     }
     if ($action === 'state') {
         if ($user['role'] === 'admin') {
+            $canManageTeachers = (int)$user['id'] === (int)$db->query("SELECT MIN(id) FROM users WHERE role='admin' AND deleted_at IS NULL")->fetchColumn();
+            $teachers = $db->query("SELECT id,name,login,role,active,created_at FROM users WHERE role='admin' AND deleted_at IS NULL ORDER BY name,id")->fetchAll();
             $students = $db->query("SELECT id,name,login,role,active,created_at FROM users WHERE role='student' AND deleted_at IS NULL ORDER BY active DESC,name")->fetchAll();
             $tasks = $db->query('SELECT tasks.*,users.name AS student_name FROM tasks JOIN users ON tasks.student_id=users.id WHERE tasks.deleted_at IS NULL AND users.deleted_at IS NULL ORDER BY tasks.updated_at DESC,tasks.id DESC')->fetchAll();
             $homeworks = $db->query("SELECT h.*,u.name AS student_name,(SELECT COUNT(*) FROM homework_questions q WHERE q.homework_id=h.id) AS question_count,(SELECT COUNT(*) FROM homework_questions q WHERE q.homework_id=h.id AND (trim(q.answer_text)<>'' OR trim(q.code_text)<>'' OR EXISTS(SELECT 1 FROM homework_files f WHERE f.question_id=q.id AND f.deleted=0))) AS answered_count FROM homeworks h JOIN users u ON h.student_id=u.id WHERE h.deleted_at IS NULL AND u.deleted_at IS NULL ORDER BY h.updated_at DESC,h.id DESC")->fetchAll();
         } else {
-            $students = []; $tasks = run($db,'SELECT tasks.*,? AS student_name FROM tasks WHERE student_id=? AND deleted_at IS NULL ORDER BY updated_at DESC,id DESC',[$user['name'],$user['id']])->fetchAll();
+            $canManageTeachers = false; $teachers = []; $students = []; $tasks = run($db,'SELECT tasks.*,? AS student_name FROM tasks WHERE student_id=? AND deleted_at IS NULL ORDER BY updated_at DESC,id DESC',[$user['name'],$user['id']])->fetchAll();
             $homeworks = run($db,"SELECT h.*,? AS student_name,(SELECT COUNT(*) FROM homework_questions q WHERE q.homework_id=h.id) AS question_count,(SELECT COUNT(*) FROM homework_questions q WHERE q.homework_id=h.id AND (trim(q.answer_text)<>'' OR trim(q.code_text)<>'' OR EXISTS(SELECT 1 FROM homework_files f WHERE f.question_id=q.id AND f.deleted=0))) AS answered_count FROM homeworks h WHERE h.student_id=? AND h.deleted_at IS NULL ORDER BY h.updated_at DESC,h.id DESC",[$user['name'],$user['id']])->fetchAll();
         }
         $files = $user['role'] === 'admin'
@@ -679,7 +686,7 @@ try {
         foreach ($tasks as &$item) $item['attachments']=$byTask[$item['id']] ?? [];
         unset($item);
         $meeting=$user['role']==='student'?run($db,"SELECT id,status,expires_at,created_at FROM meetings WHERE student_id=? AND status='active' AND expires_at>? ORDER BY id DESC LIMIT 1",[$user['id'],time()])->fetch()?:null:null;
-        reply(['user'=>publicUser($user),'students'=>$students,'tasks'=>$tasks,'homeworks'=>$homeworks,'meeting'=>$meeting]);
+        reply(['user'=>publicUser($user),'can_manage_teachers'=>$canManageTeachers,'teachers'=>$teachers,'students'=>$students,'tasks'=>$tasks,'homeworks'=>$homeworks,'meeting'=>$meeting]);
     }
     if ($action === 'change_password') {
         $old = textValue($data,'old_password',72,true);
@@ -697,7 +704,16 @@ try {
         if (run($db,'SELECT id FROM users WHERE login=?',[$login])->fetch()) fail('Этот логин уже занят.');
         $password = bin2hex(random_bytes(8));
         run($db,"INSERT INTO users(name,login,password_hash,role) VALUES(?,?,?,'student')",[$name,$login,password_hash($password,PASSWORD_DEFAULT)]);
-        reply(['id'=>(int)$db->lastInsertId(),'name'=>$name,'login'=>$login,'password'=>$password],201);
+        reply(['id'=>(int)$db->lastInsertId(),'name'=>$name,'login'=>$login,'role'=>'student','password'=>$password],201);
+    }
+    if ($action === 'create_teacher') {
+        requireOwner($db,$user);
+        $name = textValue($data,'name',160,true); $login = strtolower(textValue($data,'login',64,true));
+        if (!preg_match('/^[a-z0-9._-]{3,64}$/D',$login)) fail('Логин: 3–64 латинских буквы, цифры, точки, дефисы или подчёркивания.');
+        if (run($db,'SELECT id FROM users WHERE login=?',[$login])->fetch()) fail('Этот логин уже занят.');
+        $password = bin2hex(random_bytes(8));
+        run($db,"INSERT INTO users(name,login,password_hash,role) VALUES(?,?,?,'admin')",[$name,$login,password_hash($password,PASSWORD_DEFAULT)]);
+        reply(['id'=>(int)$db->lastInsertId(),'name'=>$name,'login'=>$login,'role'=>'admin','password'=>$password],201);
     }
     if ($action === 'student_access' || $action === 'reset_password') {
         requireAdmin($user); $id = idValue($data,'id');
