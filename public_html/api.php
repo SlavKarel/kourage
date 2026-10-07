@@ -412,7 +412,9 @@ try {
             $latest=run($db,'SELECT revision,updated_at FROM classwork_files WHERE id=?',[$fileId])->fetch();$payload=['ok'=>true,'revision'=>(int)$latest['revision'],'updated_at'=>$latest['updated_at']];
             if((int)$latest['revision']>$known){$path=$directory.'/'.$record['storage_name'];$remote=is_file($path)?file_get_contents($path):false;if($remote===false)fail('Файл отсутствует на сервере.',404);$payload['content']=$remote;}
             $payload['presence']=run($db,"SELECT p.user_id,p.file_id,p.cursor_start,p.cursor_end,p.last_seen,u.name,u.role FROM editor_presence p JOIN users u ON u.id=p.user_id WHERE p.student_id=? AND p.last_seen>=? ORDER BY u.role,u.name",[$studentId,time()-15])->fetchAll();
-            $payload['run']=run($db,"SELECT r.student_id,r.file_id,r.run_id,r.runner_id,r.status,r.stdin,r.output,r.updated_at,u.name AS runner_name FROM editor_runs r JOIN users u ON u.id=r.runner_id WHERE r.student_id=?",[$studentId])->fetch()?:null;
+            $activeRun=run($db,"SELECT r.student_id,r.file_id,r.run_id,r.runner_id,r.status,r.stdin,r.output,r.updated_at,u.name AS runner_name FROM editor_runs r JOIN users u ON u.id=r.runner_id WHERE r.student_id=?",[$studentId])->fetch()?:null;
+            if($activeRun){$activeRun['output_size']=strlen((string)$activeRun['output']);if(isset($data['known_run_id'],$data['known_run_status'],$data['known_run_output_size'])&&hash_equals((string)$activeRun['run_id'],(string)$data['known_run_id'])&&(string)$activeRun['status']===(string)$data['known_run_status']&&(int)$activeRun['output_size']===(int)$data['known_run_output_size'])unset($activeRun['output']);}
+            $payload['run']=$activeRun;
             $payload['assignment']=editorAssignment($db,$studentId);
             reply($payload);
         }
@@ -437,10 +439,10 @@ try {
             $fileId=idValue($data,'file_id');$record=run($db,'SELECT id,name FROM classwork_files WHERE id=? AND student_id=? AND deleted=0',[$fileId,$studentId])->fetch();if(!$record||strtolower(pathinfo($record['name'],PATHINFO_EXTENSION))!=='py')fail('Выберите Python-файл.',400);
             $stdin='';$runId=bin2hex(random_bytes(16));
             run($db,"INSERT INTO editor_runs(student_id,file_id,run_id,runner_id,status,stdin,output,updated_at) VALUES(?,?,?,?,'running',?,'',?) ON CONFLICT(student_id) DO UPDATE SET file_id=excluded.file_id,run_id=excluded.run_id,runner_id=excluded.runner_id,status='running',stdin=excluded.stdin,output='',updated_at=excluded.updated_at",[$studentId,$fileId,$runId,$user['id'],$stdin,time()]);
-            reply(['run_id'=>$runId,'file_id'=>$fileId,'runner_id'=>(int)$user['id'],'runner_name'=>$user['name'],'status'=>'running','stdin'=>$stdin,'output'=>'','updated_at'=>time()]);
+            reply(['run_id'=>$runId,'file_id'=>$fileId,'runner_id'=>(int)$user['id'],'runner_name'=>$user['name'],'status'=>'running','stdin'=>$stdin,'output'=>'','output_size'=>0,'updated_at'=>time()]);
         }
         if($action==='editor_run_update'){
-            $runId=$data['run_id']??'';$status=$data['status']??'running';$output=$data['output']??'';if(!is_string($runId)||!preg_match('/^[a-f0-9]{32}$/D',$runId)||!in_array($status,['running','done','error'],true)||!is_string($output)||strlen($output)>190000)fail('Некорректный результат запуска.');
+            $runId=$data['run_id']??'';$status=$data['status']??'running';$output=$data['output']??'';if(!is_string($runId)||!preg_match('/^[a-f0-9]{32}$/D',$runId)||!in_array($status,['running','done','error'],true)||!is_string($output)||strlen($output)>4000000)fail('Результат запуска слишком большой. Уменьшите объём вывода или сложность рисунка.',413);
             $changed=run($db,'UPDATE editor_runs SET status=?,output=?,updated_at=? WHERE student_id=? AND run_id=? AND runner_id=?',[$status,$output,time(),$studentId,$runId,$user['id']])->rowCount();if(!$changed)fail('Этот запуск уже завершён или заменён.',409);reply(['ok'=>true]);
         }
         if($action==='editor_run_stop'){
