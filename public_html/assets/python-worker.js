@@ -8,7 +8,7 @@ async function runtime(){
   return runtimePromise;
 }
 async function turtleSource(){
-  if(!turtleSourcePromise)turtleSourcePromise=fetch(new URL('kourage-turtle.txt?v=1',self.location.href)).then(response=>{if(!response.ok)throw new Error('Не удалось загрузить поддержку turtle.');return response.text();});
+  if(!turtleSourcePromise)turtleSourcePromise=fetch(new URL('kourage-turtle.txt?v=2',self.location.href)).then(response=>{if(!response.ok)throw new Error('Не удалось загрузить поддержку turtle.');return response.text();});
   return turtleSourcePromise;
 }
 function emitTurtle(pyodide){

@@ -4,7 +4,10 @@ import html
 
 _shapes = []
 _background = "white"
-_limit = 700
+# A typical school drawing can easily contain several thousand short strokes
+# (grids, ornaments and nested cycles).  The previous limit of 700 interrupted
+# valid programs long before the browser had any trouble rendering the SVG.
+_limit = 20000
 
 
 def _colour(value):
@@ -18,7 +21,7 @@ def _colour(value):
 
 def _add(shape):
     if len(_shapes) >= _limit:
-        raise RuntimeError("Слишком много линий turtle. Уменьшите число шагов или циклов.")
+        raise RuntimeError("Рисунок turtle превысил 20 000 элементов. Уменьшите число шагов или циклов.")
     _shapes.append(shape)
 
 
