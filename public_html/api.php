@@ -52,6 +52,11 @@ function requireOwnedStudent(PDO $db, array $user, int $studentId, bool $activeO
     if (!$student) fail($activeOnly?'Активный ученик не найден.':'Ученик не найден.',404);
     return $student;
 }
+function requirePrimaryStudent(PDO $db, array $user, int $studentId): array {
+    $student=requireOwnedStudent($db,$user,$studentId);
+    if((int)$student['teacher_id']!==(int)$user['id'])fail('Управлять общим аккаунтом ученика может его основной преподаватель.',403);
+    return $student;
+}
 function studentContexts(PDO $db, array $user): array {
     if ($user['role'] !== 'student') return [];
     return run($db,"SELECT st.teacher_id,st.subject,u.name AS teacher_name FROM student_teachers st JOIN users u ON u.id=st.teacher_id WHERE st.student_id=? AND u.role='admin' AND u.active=1 AND u.deleted_at IS NULL ORDER BY st.created_at,st.teacher_id",[$user['id']])->fetchAll();
@@ -780,7 +785,7 @@ try {
         if ($user['role'] === 'admin') {
             $canManageTeachers = (int)$user['id'] === (int)$db->query("SELECT MIN(id) FROM users WHERE role='admin' AND deleted_at IS NULL")->fetchColumn();
             $teachers = $canManageTeachers ? $db->query("SELECT id,name,login,role,active,created_at FROM users WHERE role='admin' AND deleted_at IS NULL ORDER BY name,id")->fetchAll() : [];
-            $students = run($db,"SELECT u.id,u.name,u.login,u.role,u.active,u.created_at FROM users u JOIN student_teachers st ON st.student_id=u.id WHERE u.role='student' AND st.teacher_id=? AND u.deleted_at IS NULL ORDER BY u.active DESC,u.name",[$user['id']])->fetchAll();
+            $students = run($db,"SELECT u.id,u.name,u.login,u.role,u.teacher_id,u.active,u.created_at,st.subject FROM users u JOIN student_teachers st ON st.student_id=u.id WHERE u.role='student' AND st.teacher_id=? AND u.deleted_at IS NULL ORDER BY u.active DESC,u.name",[$user['id']])->fetchAll();
             $tasks = run($db,'SELECT tasks.*,users.name AS student_name FROM tasks JOIN users ON tasks.student_id=users.id WHERE tasks.teacher_id=? AND tasks.deleted_at IS NULL AND users.deleted_at IS NULL ORDER BY tasks.updated_at DESC,tasks.id DESC',[$user['id']])->fetchAll();
             $homeworks = run($db,"SELECT h.*,u.name AS student_name,(SELECT COUNT(*) FROM homework_questions q WHERE q.homework_id=h.id) AS question_count,(SELECT COUNT(*) FROM homework_questions q WHERE q.homework_id=h.id AND (trim(q.answer_text)<>'' OR trim(q.code_text)<>'' OR EXISTS(SELECT 1 FROM homework_files f WHERE f.question_id=q.id AND f.deleted=0))) AS answered_count FROM homeworks h JOIN users u ON h.student_id=u.id WHERE h.created_by=? AND h.deleted_at IS NULL AND u.deleted_at IS NULL ORDER BY h.updated_at DESC,h.id DESC",[$user['id']])->fetchAll();
         } else {
@@ -849,7 +854,7 @@ try {
     }
     if ($action === 'student_access' || $action === 'reset_password') {
         requireAdmin($user); $id = idValue($data,'id');
-        $student = requireOwnedStudent($db,$user,$id);
+        $student = requirePrimaryStudent($db,$user,$id);
         if ($action === 'student_access') {
             if (!is_bool($data['active'] ?? null)) fail('Некорректный статус доступа.');
             run($db,'UPDATE users SET active=?,auth_version=auth_version+1 WHERE id=?',[(int)$data['active'],$id]); reply(['ok'=>true]);
@@ -860,7 +865,7 @@ try {
     }
     if ($action === 'delete_student') {
         requireAdmin($user); $id = idValue($data,'id');
-        $student = requireOwnedStudent($db,$user,$id);
+        $student = requirePrimaryStudent($db,$user,$id);
         $db->exec('BEGIN IMMEDIATE');
         try {
             run($db,"UPDATE users SET active=0,auth_version=auth_version+1,deleted_at=strftime('%Y-%m-%dT%H:%M:%SZ','now') WHERE id=? AND deleted_at IS NULL",[$id]);
