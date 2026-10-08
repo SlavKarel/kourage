@@ -71,6 +71,16 @@ function activeTeacherId(PDO $db, array $user): int {
     $_SESSION['teacher_context_id']=$selected;
     return $selected;
 }
+function activeStudentSubject(PDO $db, array $user): string {
+    if ($user['role'] !== 'student') return 'Информатика';
+    $subject = run($db,'SELECT subject FROM student_teachers WHERE student_id=? AND teacher_id=?',[$user['id'],activeTeacherId($db,$user)])->fetchColumn();
+    return in_array($subject,['Информатика','Математика'],true) ? $subject : 'Информатика';
+}
+function bankSubject(array $data): string {
+    $subject=textValue($data,'subject',100,true);
+    if(!in_array($subject,['Информатика','Математика'],true))fail('Выберите банк: Информатика или Математика.');
+    return $subject;
+}
 function validLink(string $url): string {
     if ($url !== '' && (!filter_var($url, FILTER_VALIDATE_URL) || !in_array(strtolower((string)parse_url($url,PHP_URL_SCHEME)), ['http','https'],true))) fail('Укажите ссылку, начинающуюся с https:// или http://.');
     return $url;
@@ -195,6 +205,8 @@ try {
     $db->exec("UPDATE attachments SET relative_path=name WHERE relative_path IS NULL OR relative_path=''");
     $bankColumns=array_column($db->query('PRAGMA table_info(question_bank)')->fetchAll(),'name');
     if(!in_array('exam_number',$bankColumns,true))$db->exec('ALTER TABLE question_bank ADD COLUMN exam_number INTEGER');
+    $db->exec("UPDATE question_bank SET subject='Информатика' WHERE subject NOT IN ('Информатика','Математика')");
+    $db->exec('CREATE INDEX IF NOT EXISTS idx_question_bank_subject ON question_bank(subject,deleted_at,updated_at DESC)');
     $classworkColumns=array_column($db->query('PRAGMA table_info(classwork_files)')->fetchAll(),'name');
     if(!in_array('teacher_id',$classworkColumns,true))$db->exec('ALTER TABLE classwork_files ADD COLUMN teacher_id INTEGER REFERENCES users(id)');
     if(!in_array('revision',$classworkColumns,true))$db->exec('ALTER TABLE classwork_files ADD COLUMN revision INTEGER NOT NULL DEFAULT 1');
@@ -523,7 +535,7 @@ try {
             $bankItemId=null;$title='';$prompt='';$answer='';$explanation='';
             if(!empty($data['bank_item_id'])){
                 $bankItemId=idValue($data,'bank_item_id');
-                $item=run($db,'SELECT id,title,prompt,correct_answer,explanation FROM question_bank WHERE id=? AND teacher_id=? AND deleted_at IS NULL',[$bankItemId,$user['id']])->fetch();
+                $item=run($db,"SELECT q.id,q.title,q.prompt,q.correct_answer,q.explanation FROM question_bank q JOIN users u ON u.id=q.teacher_id WHERE q.id=? AND q.deleted_at IS NULL AND u.active=1 AND u.deleted_at IS NULL",[$bankItemId])->fetch();
                 if(!$item)fail('Задание банка не найдено.',404);
                 $title=$item['title'];$prompt=$item['prompt'];$answer=$item['correct_answer'];$explanation=$item['explanation'];
             }else{
@@ -617,21 +629,21 @@ try {
     }
     if ($action === 'bank_state') {
         if ($user['role'] === 'admin') {
-            $items = run($db,'SELECT id,title,subject,topic,exam_number,difficulty,prompt,correct_answer,explanation,default_score,created_at,updated_at FROM question_bank WHERE teacher_id=? AND deleted_at IS NULL ORDER BY updated_at DESC,id DESC',[$user['id']])->fetchAll();
+            $items = run($db,"SELECT q.id,q.teacher_id,q.title,q.subject,q.topic,q.exam_number,q.difficulty,q.prompt,q.correct_answer,q.explanation,q.default_score,q.created_at,q.updated_at,u.name AS author_name,CASE WHEN q.teacher_id=? THEN 1 ELSE 0 END AS can_edit FROM question_bank q JOIN users u ON u.id=q.teacher_id WHERE q.deleted_at IS NULL AND u.active=1 AND u.deleted_at IS NULL ORDER BY q.updated_at DESC,q.id DESC",[$user['id']])->fetchAll();
         } else {
-            $items = run($db,"SELECT q.id,q.title,q.subject,q.topic,q.exam_number,q.difficulty,q.prompt,q.correct_answer,q.explanation,q.default_score,q.created_at,q.updated_at,u.name AS teacher_name FROM question_bank q JOIN users u ON u.id=q.teacher_id WHERE q.teacher_id=? AND q.deleted_at IS NULL AND u.active=1 AND u.deleted_at IS NULL ORDER BY q.updated_at DESC,q.id DESC",[activeTeacherId($db,$user)])->fetchAll();
+            $items = run($db,"SELECT q.id,q.teacher_id,q.title,q.subject,q.topic,q.exam_number,q.difficulty,q.prompt,q.correct_answer,q.explanation,q.default_score,q.created_at,q.updated_at,u.name AS author_name,0 AS can_edit FROM question_bank q JOIN users u ON u.id=q.teacher_id WHERE q.subject=? AND q.deleted_at IS NULL AND u.active=1 AND u.deleted_at IS NULL ORDER BY q.updated_at DESC,q.id DESC",[activeStudentSubject($db,$user)])->fetchAll();
         }
         $itemIds=array_map(static fn($item)=>(int)$item['id'],$items);$byItem=[];
         if($itemIds){$marks=implode(',',array_fill(0,count($itemIds),'?'));$files=run($db,"SELECT id,bank_item_id,name,size,mime,created_at FROM question_bank_files WHERE deleted=0 AND bank_item_id IN ($marks) ORDER BY id",$itemIds)->fetchAll();foreach($files as $file)$byItem[$file['bank_item_id']][]=$file;}
         foreach($items as &$item)$item['files']=$byItem[$item['id']]??[];unset($item);
-        reply(['user'=>publicUser($user),'items'=>$items,'csrf'=>$_SESSION['csrf']]);
+        reply(['user'=>publicUser($user),'items'=>$items,'subjects'=>['Информатика','Математика'],'csrf'=>$_SESSION['csrf']]);
     }
     if (in_array($action,['bank_file_upload','bank_file_delete','bank_file_download','bank_file_view'],true)) {
         $source=in_array($action,['bank_file_download','bank_file_view'],true)?$_GET:$data;
         if(in_array($action,['bank_file_download','bank_file_view'],true)){
-            $fileId=idValue($source,'id');$record=run($db,'SELECT f.*,q.teacher_id,q.deleted_at AS bank_deleted,u.active AS teacher_active,u.deleted_at AS teacher_deleted FROM question_bank_files f JOIN question_bank q ON q.id=f.bank_item_id JOIN users u ON u.id=q.teacher_id WHERE f.id=? AND f.deleted=0',[$fileId])->fetch();
+            $fileId=idValue($source,'id');$record=run($db,'SELECT f.*,q.teacher_id,q.subject,q.deleted_at AS bank_deleted,u.active AS teacher_active,u.deleted_at AS teacher_deleted FROM question_bank_files f JOIN question_bank q ON q.id=f.bank_item_id JOIN users u ON u.id=q.teacher_id WHERE f.id=? AND f.deleted=0',[$fileId])->fetch();
             if(!$record)fail('Файл не найден.',404);
-            if($user['role']==='admin'){$visible=(int)$record['teacher_id']===(int)$user['id'];}else{$visible=((int)$record['teacher_id']===activeTeacherId($db,$user)&&$record['bank_deleted']===null&&(int)$record['teacher_active']&&$record['teacher_deleted']===null)||(bool)run($db,'SELECT 1 FROM homework_questions q JOIN homeworks h ON h.id=q.homework_id WHERE q.bank_item_id=? AND h.student_id=? AND h.deleted_at IS NULL LIMIT 1',[$record['bank_item_id'],$user['id']])->fetchColumn()||(bool)run($db,'SELECT 1 FROM editor_assignments_context WHERE bank_item_id=? AND student_id=? LIMIT 1',[$record['bank_item_id'],$user['id']])->fetchColumn();}
+            if($user['role']==='admin'){$visible=$record['bank_deleted']===null&&(int)$record['teacher_active']&&$record['teacher_deleted']===null;}else{$visible=($record['subject']===activeStudentSubject($db,$user)&&$record['bank_deleted']===null&&(int)$record['teacher_active']&&$record['teacher_deleted']===null)||(bool)run($db,'SELECT 1 FROM homework_questions q JOIN homeworks h ON h.id=q.homework_id WHERE q.bank_item_id=? AND h.student_id=? AND h.deleted_at IS NULL LIMIT 1',[$record['bank_item_id'],$user['id']])->fetchColumn()||(bool)run($db,'SELECT 1 FROM editor_assignments_context WHERE bank_item_id=? AND student_id=? LIMIT 1',[$record['bank_item_id'],$user['id']])->fetchColumn();}
             if(!$visible)fail('Файл не найден.',404);
             $path=$private.'/bank_uploads/'.$record['storage_name'];if(!is_file($path))fail('Файл отсутствует на сервере.',404);
             if($action==='bank_file_view'){
@@ -650,7 +662,7 @@ try {
     }
     if ($action === 'bank_save') {
         requireAdmin($user);
-        $title=textValue($data,'title',250,true);$subject=textValue($data,'subject',100,true);$topic=textValue($data,'topic',100);
+        $title=textValue($data,'title',250,true);$subject=bankSubject($data);$topic=textValue($data,'topic',100);
         $examNumber=filter_var($data['exam_number']??null,FILTER_VALIDATE_INT);if($examNumber===false||$examNumber<1||$examNumber>27)fail('Выберите номер задания от 1 до 27.');
         $difficulty=textValue($data,'difficulty',20,true);if(!in_array($difficulty,['easy','medium','hard'],true))fail('Некорректная сложность.');
         $prompt=textValue($data,'prompt',30000,true);$answer=textValue($data,'correct_answer',5000,true);$explanation=textValue($data,'explanation',15000);
@@ -681,7 +693,7 @@ try {
         foreach($rawQuestions as $index=>$raw){
             if(!is_array($raw))fail('Некорректное задание.');
             $bankId=isset($raw['bank_item_id'])&&$raw['bank_item_id']!==''?filter_var($raw['bank_item_id'],FILTER_VALIDATE_INT):null;
-            if($bankId){if(isset($seenBankItems[(int)$bankId]))fail('Одно задание банка нельзя добавить в домашнюю работу дважды.');$seenBankItems[(int)$bankId]=true;$item=run($db,'SELECT * FROM question_bank WHERE id=? AND teacher_id=? AND deleted_at IS NULL',[(int)$bankId,$user['id']])->fetch();if(!$item)fail('Одно из заданий банка больше недоступно.',404);$q=['bank_item_id'=>(int)$item['id'],'title'=>$item['title'],'prompt'=>$item['prompt'],'correct_answer'=>$item['correct_answer'],'explanation'=>$item['explanation'],'max_score'=>(int)$item['default_score']];}
+            if($bankId){if(isset($seenBankItems[(int)$bankId]))fail('Одно задание банка нельзя добавить в домашнюю работу дважды.');$seenBankItems[(int)$bankId]=true;$item=run($db,"SELECT q.* FROM question_bank q JOIN users u ON u.id=q.teacher_id WHERE q.id=? AND q.deleted_at IS NULL AND u.active=1 AND u.deleted_at IS NULL",[(int)$bankId])->fetch();if(!$item)fail('Одно из заданий банка больше недоступно.',404);$q=['bank_item_id'=>(int)$item['id'],'title'=>$item['title'],'prompt'=>$item['prompt'],'correct_answer'=>$item['correct_answer'],'explanation'=>$item['explanation'],'max_score'=>(int)$item['default_score']];}
             else{$q=['bank_item_id'=>null,'title'=>textValue($raw,'title',250,true),'prompt'=>textValue($raw,'prompt',30000,true),'correct_answer'=>textValue($raw,'correct_answer',5000,true),'explanation'=>textValue($raw,'explanation',15000)];$q['max_score']=filter_var($raw['max_score']??null,FILTER_VALIDATE_INT);if($q['max_score']===false||$q['max_score']<1||$q['max_score']>1000)fail('Проверьте баллы у заданий.');}
             $q['position']=$index+1;$total+=(int)$q['max_score'];$questions[]=$q;
         }
