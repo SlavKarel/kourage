@@ -16,4 +16,5 @@ setup-key.txt
 *.log
 .DS_Store
 node_modules/
+tools/whiteboard-app/dist/
 .sites-runtime/

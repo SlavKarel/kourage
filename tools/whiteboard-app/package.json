@@ -1,0 +1,16 @@
+{
+  "name": "kourage-whiteboard-app",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "vite build && cp dist/assets/whiteboard-app.js ../../public_html/assets/whiteboard-app.js && cp dist/assets/whiteboard-app.css ../../public_html/assets/whiteboard-app.css"
+  },
+  "dependencies": {
+    "@excalidraw/excalidraw": "0.18.0",
+    "@vitejs/plugin-react": "latest",
+    "vite": "latest",
+    "react": "18.3.1",
+    "react-dom": "18.3.1"
+  },
+  "devDependencies": {}
+}

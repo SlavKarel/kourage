@@ -143,6 +143,11 @@ try {
     CREATE TABLE IF NOT EXISTS whiteboards (id INTEGER PRIMARY KEY, teacher_id INTEGER NOT NULL REFERENCES users(id), student_id INTEGER NOT NULL REFERENCES users(id), title TEXT NOT NULL, board_key TEXT NOT NULL UNIQUE, created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now')), updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now')), deleted_at TEXT);
     CREATE INDEX IF NOT EXISTS idx_whiteboards_teacher_student ON whiteboards(teacher_id,student_id,deleted_at,updated_at DESC);
     CREATE INDEX IF NOT EXISTS idx_whiteboards_student ON whiteboards(student_id,deleted_at,updated_at DESC);
+    CREATE TABLE IF NOT EXISTS whiteboard_records (board_id INTEGER NOT NULL REFERENCES whiteboards(id) ON DELETE CASCADE, record_id TEXT NOT NULL, record_json TEXT NOT NULL, updated_revision INTEGER NOT NULL, PRIMARY KEY(board_id,record_id));
+    CREATE TABLE IF NOT EXISTS whiteboard_changes (board_id INTEGER NOT NULL REFERENCES whiteboards(id) ON DELETE CASCADE, revision INTEGER NOT NULL, changed_json TEXT NOT NULL, removed_json TEXT NOT NULL, actor_id INTEGER NOT NULL REFERENCES users(id), created_at INTEGER NOT NULL, PRIMARY KEY(board_id,revision));
+    CREATE INDEX IF NOT EXISTS idx_whiteboard_changes_board_revision ON whiteboard_changes(board_id,revision);
+    CREATE TABLE IF NOT EXISTS whiteboard_presence (board_id INTEGER NOT NULL REFERENCES whiteboards(id) ON DELETE CASCADE, user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE, presence_json TEXT NOT NULL, last_seen INTEGER NOT NULL, PRIMARY KEY(board_id,user_id));
+    CREATE INDEX IF NOT EXISTS idx_whiteboard_presence_seen ON whiteboard_presence(board_id,last_seen);
     CREATE TABLE IF NOT EXISTS attempts (key TEXT PRIMARY KEY, count INTEGER NOT NULL, until INTEGER NOT NULL);");
     $userColumns = array_column($db->query('PRAGMA table_info(users)')->fetchAll(),'name');
     if (!in_array('deleted_at',$userColumns,true)) $db->exec('ALTER TABLE users ADD COLUMN deleted_at TEXT');
@@ -159,6 +164,9 @@ try {
     if(!in_array('revision',$classworkColumns,true))$db->exec('ALTER TABLE classwork_files ADD COLUMN revision INTEGER NOT NULL DEFAULT 1');
     if(!in_array('updated_at',$classworkColumns,true))$db->exec("ALTER TABLE classwork_files ADD COLUMN updated_at TEXT");
     $db->exec("UPDATE classwork_files SET updated_at=created_at WHERE updated_at IS NULL OR updated_at=''");
+    $whiteboardColumns=array_column($db->query('PRAGMA table_info(whiteboards)')->fetchAll(),'name');
+    if(!in_array('provider',$whiteboardColumns,true))$db->exec("ALTER TABLE whiteboards ADD COLUMN provider TEXT NOT NULL DEFAULT 'wbo'");
+    if(!in_array('sync_revision',$whiteboardColumns,true))$db->exec('ALTER TABLE whiteboards ADD COLUMN sync_revision INTEGER NOT NULL DEFAULT 0');
     if (is_file($private.'/kourage.sqlite')) @chmod($private.'/kourage.sqlite',0600);
     run($db,'DELETE FROM remember_tokens WHERE expires_at < ?',[time()]);
     $_SESSION['csrf'] ??= bin2hex(random_bytes(24));
@@ -166,11 +174,12 @@ try {
     $method = $_SERVER['REQUEST_METHOD'];
     $data = [];
     if ($method === 'POST') {
-        if ((int)($_SERVER['CONTENT_LENGTH'] ?? 0) > (in_array($action,['upload','classwork_upload','homework_file_upload','bank_file_upload'],true) ? 11*1024*1024 : 200000)) fail('Слишком большой запрос.',413);
+        if ((int)($_SERVER['CONTENT_LENGTH'] ?? 0) > (in_array($action,['upload','classwork_upload','homework_file_upload','bank_file_upload','whiteboard_sync'],true) ? 11*1024*1024 : 200000)) fail('Слишком большой запрос.',413);
         if (!hash_equals($_SESSION['csrf'],$_SERVER['HTTP_X_CSRF_TOKEN'] ?? '')) fail('Обновите страницу и повторите действие.',403);
         if (in_array($action,['upload','classwork_upload','homework_file_upload','bank_file_upload'],true)) { $data = $_POST; } else {
-        $raw = file_get_contents('php://input',false,null,0,200001);
-        if (strlen($raw) > 200000) fail('Слишком большой запрос.',413);
+        $jsonLimit=$action==='whiteboard_sync'?11*1024*1024:200000;
+        $raw = file_get_contents('php://input',false,null,0,$jsonLimit+1);
+        if (strlen($raw) > $jsonLimit) fail('Слишком большой запрос.',413);
         $data = json_decode($raw,true);
         if (!is_array($data)) fail('Некорректный запрос.');
         }
@@ -183,7 +192,7 @@ try {
     if (!$user) $user = restoreRemember($db,$rememberCookie,$secure);
     if ($user) $_SESSION['last_seen'] = time();
     if ($action === 'bootstrap' && $method === 'GET') reply(['installed'=>$installed,'user'=>$user ? publicUser($user) : null,'csrf'=>$_SESSION['csrf']]);
-    if ($method !== 'POST' && !in_array($action,['state','download','preview','classwork_state','classwork_download','classwork_preview','editor_state','editor_file','bank_state','bank_file_download','bank_file_view','homework_detail','homework_file_download','meeting_state','meeting_redirect','whiteboard_state'],true)) fail('Используйте POST.',405);
+    if ($method !== 'POST' && !in_array($action,['state','download','preview','classwork_state','classwork_download','classwork_preview','editor_state','editor_file','bank_state','bank_file_download','bank_file_view','homework_detail','homework_file_download','meeting_state','meeting_redirect','whiteboard_state','whiteboard_document'],true)) fail('Используйте POST.',405);
     if ($action === 'login' || $action === 'setup') {
         $remember = $data['remember'] ?? false;
         if (!is_bool($remember)) fail('Некорректная настройка запоминания входа.');
@@ -221,23 +230,32 @@ try {
     }
     if (!$user) fail('Войдите в свой кабинет.',401);
     if (str_starts_with($action,'whiteboard_')) {
+        $boardForUser=function(int $id)use($db,$user):array{
+            $board=$user['role']==='admin'?run($db,'SELECT * FROM whiteboards WHERE id=? AND teacher_id=? AND deleted_at IS NULL',[$id,$user['id']])->fetch():run($db,'SELECT * FROM whiteboards WHERE id=? AND student_id=? AND deleted_at IS NULL',[$id,$user['id']])->fetch();
+            if(!$board)fail('Доска недоступна.',404);
+            return $board;
+        };
+        $boardEvents=function(int $boardId,int $since)use($db):array{
+            $rows=run($db,'SELECT revision,changed_json,removed_json,actor_id FROM whiteboard_changes WHERE board_id=? AND revision>? ORDER BY revision',[$boardId,$since])->fetchAll();
+            return array_map(static fn(array $row)=>['revision'=>(int)$row['revision'],'changed'=>json_decode($row['changed_json'],true)?:[],'removed'=>json_decode($row['removed_json'],true)?:[],'actor_id'=>(int)$row['actor_id']],$rows);
+        };
         if($action==='whiteboard_state'){
             if($user['role']==='admin'){
                 $students=$db->query("SELECT id,name,login,active FROM users WHERE role='student' AND deleted_at IS NULL ORDER BY active DESC,name")->fetchAll();
                 $studentId=filter_input(INPUT_GET,'student_id',FILTER_VALIDATE_INT)?:((int)($students[0]['id']??0));
                 if($studentId&&!run($db,"SELECT id FROM users WHERE id=? AND role='student' AND deleted_at IS NULL",[$studentId])->fetch())fail('Ученик не найден.',404);
-                $boards=$studentId?run($db,"SELECT id,student_id,title,created_at,updated_at FROM whiteboards WHERE teacher_id=? AND student_id=? AND deleted_at IS NULL ORDER BY updated_at DESC,id DESC",[$user['id'],$studentId])->fetchAll():[];
+                $boards=$studentId?run($db,"SELECT id,student_id,title,provider,created_at,updated_at FROM whiteboards WHERE teacher_id=? AND student_id=? AND deleted_at IS NULL ORDER BY updated_at DESC,id DESC",[$user['id'],$studentId])->fetchAll():[];
                 reply(['user'=>publicUser($user),'students'=>$students,'student_id'=>$studentId,'boards'=>$boards,'csrf'=>$_SESSION['csrf']]);
             }
-            $boards=run($db,"SELECT id,student_id,title,created_at,updated_at FROM whiteboards WHERE student_id=? AND deleted_at IS NULL ORDER BY updated_at DESC,id DESC",[$user['id']])->fetchAll();
+            $boards=run($db,"SELECT id,student_id,title,provider,created_at,updated_at FROM whiteboards WHERE student_id=? AND deleted_at IS NULL ORDER BY updated_at DESC,id DESC",[$user['id']])->fetchAll();
             reply(['user'=>publicUser($user),'students'=>[],'student_id'=>(int)$user['id'],'boards'=>$boards,'csrf'=>$_SESSION['csrf']]);
         }
         if($action==='whiteboard_create'){
             requireAdmin($user);$studentId=idValue($data,'student_id');$title=textValue($data,'title',160,true);
             $student=run($db,"SELECT id FROM users WHERE id=? AND role='student' AND active=1 AND deleted_at IS NULL",[$studentId])->fetch();if(!$student)fail('Активный ученик не найден.',404);
             $boardKey='kourage-'.bin2hex(random_bytes(24));
-            run($db,'INSERT INTO whiteboards(teacher_id,student_id,title,board_key) VALUES(?,?,?,?)',[$user['id'],$studentId,$title,$boardKey]);
-            reply(['board'=>['id'=>(int)$db->lastInsertId(),'student_id'=>$studentId,'title'=>$title,'created_at'=>gmdate('Y-m-d\TH:i:s\Z'),'updated_at'=>gmdate('Y-m-d\TH:i:s\Z')]],201);
+            run($db,"INSERT INTO whiteboards(teacher_id,student_id,title,board_key,provider) VALUES(?,?,?,?, 'excalidraw')",[$user['id'],$studentId,$title,$boardKey]);
+            reply(['board'=>['id'=>(int)$db->lastInsertId(),'student_id'=>$studentId,'title'=>$title,'provider'=>'excalidraw','created_at'=>gmdate('Y-m-d\TH:i:s\Z'),'updated_at'=>gmdate('Y-m-d\TH:i:s\Z')]],201);
         }
         if($action==='whiteboard_update'){
             requireAdmin($user);$id=idValue($data,'id');$title=textValue($data,'title',160,true);
@@ -250,10 +268,46 @@ try {
         }
         if($action==='whiteboard_open'){
             $id=idValue($data,'id');
-            $board=$user['role']==='admin'?run($db,'SELECT id,title,board_key FROM whiteboards WHERE id=? AND teacher_id=? AND deleted_at IS NULL',[$id,$user['id']])->fetch():run($db,'SELECT id,title,board_key FROM whiteboards WHERE id=? AND student_id=? AND deleted_at IS NULL',[$id,$user['id']])->fetch();
-            if(!$board)fail('Доска недоступна.',404);
+            $board=$boardForUser($id);
             run($db,"UPDATE whiteboards SET updated_at=strftime('%Y-%m-%dT%H:%M:%SZ','now') WHERE id=?",[$id]);
-            reply(['id'=>(int)$board['id'],'title'=>$board['title'],'url'=>'https://wbo.ophir.dev/boards/'.rawurlencode($board['board_key'])]);
+            $url=in_array($board['provider'],['excalidraw','tldraw'],true)?'whiteboard-app.html?board='.$id:'https://wbo.ophir.dev/boards/'.rawurlencode($board['board_key']);
+            reply(['id'=>(int)$board['id'],'title'=>$board['title'],'provider'=>$board['provider'],'url'=>$url]);
+        }
+        if($action==='whiteboard_document'){
+            $id=filter_input(INPUT_GET,'board',FILTER_VALIDATE_INT);if(!$id)fail('Некорректная доска.');
+            $board=$boardForUser((int)$id);if(!in_array($board['provider'],['excalidraw','tldraw'],true))fail('Эта доска использует прежний редактор.',409);
+            $hasSince=array_key_exists('since',$_GET);$since=max(0,(int)(filter_input(INPUT_GET,'since',FILTER_VALIDATE_INT)?:0));$revision=(int)$board['sync_revision'];
+            $minRevision=(int)(run($db,'SELECT MIN(revision) FROM whiteboard_changes WHERE board_id=?',[$id])->fetchColumn()?:0);
+            $reset=!$hasSince||($minRevision>0&&$since<$minRevision-1);
+            $records=$reset?array_map(static fn(array $row)=>json_decode($row['record_json'],true),run($db,'SELECT record_json FROM whiteboard_records WHERE board_id=? ORDER BY record_id',[$id])->fetchAll()):[];
+            $events=$reset?[]:$boardEvents((int)$id,$since);
+            reply(['board'=>['id'=>(int)$board['id'],'title'=>$board['title']],'user'=>publicUser($user),'csrf'=>$_SESSION['csrf'],'revision'=>$revision,'reset'=>$reset,'records'=>$records,'events'=>$events]);
+        }
+        if($action==='whiteboard_sync'){
+            $id=idValue($data,'board_id');$board=$boardForUser($id);if(!in_array($board['provider'],['excalidraw','tldraw'],true))fail('Эта доска использует прежний редактор.',409);
+            $since=max(0,(int)($data['since']??0));$changed=$data['changed']??[];$removed=$data['removed']??[];
+            if(!is_array($changed)||!is_array($removed)||count($changed)>1500||count($removed)>1500)fail('Слишком много изменений.',413);
+            foreach($changed as $record)if(!is_array($record)||!isset($record['id'])||!is_string($record['id'])||strlen($record['id'])>240)fail('Некорректные данные доски.');
+            foreach($removed as $recordId)if(!is_string($recordId)||strlen($recordId)>240)fail('Некорректные данные доски.');
+            $db->exec('BEGIN IMMEDIATE');try{
+                $current=(int)run($db,'SELECT sync_revision FROM whiteboards WHERE id=?',[$id])->fetchColumn();$revision=$current+1;
+                foreach($changed as $record)run($db,'INSERT INTO whiteboard_records(board_id,record_id,record_json,updated_revision) VALUES(?,?,?,?) ON CONFLICT(board_id,record_id) DO UPDATE SET record_json=excluded.record_json,updated_revision=excluded.updated_revision',[$id,$record['id'],json_encode($record,JSON_UNESCAPED_UNICODE|JSON_UNESCAPED_SLASHES),$revision]);
+                foreach($removed as $recordId)run($db,'DELETE FROM whiteboard_records WHERE board_id=? AND record_id=?',[$id,$recordId]);
+                run($db,'INSERT INTO whiteboard_changes(board_id,revision,changed_json,removed_json,actor_id,created_at) VALUES(?,?,?,?,?,?)',[$id,$revision,json_encode(array_values($changed),JSON_UNESCAPED_UNICODE|JSON_UNESCAPED_SLASHES),json_encode(array_values($removed),JSON_UNESCAPED_UNICODE|JSON_UNESCAPED_SLASHES),$user['id'],time()]);
+                run($db,"UPDATE whiteboards SET sync_revision=?,updated_at=strftime('%Y-%m-%dT%H:%M:%SZ','now') WHERE id=?",[$revision,$id]);
+                if($revision%100===0)run($db,'DELETE FROM whiteboard_changes WHERE board_id=? AND revision<?',[$id,max(1,$revision-2000)]);
+                $events=$boardEvents($id,$since);$db->commit();
+            }catch(Throwable $error){if($db->inTransaction())$db->rollBack();throw $error;}
+            reply(['revision'=>$revision,'events'=>$events]);
+        }
+        if($action==='whiteboard_presence'){
+            $id=idValue($data,'board_id');$board=$boardForUser($id);if(!in_array($board['provider'],['excalidraw','tldraw'],true))fail('Эта доска использует прежний редактор.',409);
+            $presence=$data['presence']??null;if(!is_array($presence))fail('Некорректное присутствие.');
+            $encoded=json_encode($presence,JSON_UNESCAPED_UNICODE|JSON_UNESCAPED_SLASHES);if(strlen($encoded)>50000)fail('Слишком много данных присутствия.',413);
+            run($db,'INSERT INTO whiteboard_presence(board_id,user_id,presence_json,last_seen) VALUES(?,?,?,?) ON CONFLICT(board_id,user_id) DO UPDATE SET presence_json=excluded.presence_json,last_seen=excluded.last_seen',[$id,$user['id'],$encoded,time()]);
+            run($db,'DELETE FROM whiteboard_presence WHERE board_id=? AND last_seen<?',[$id,time()-5]);
+            $rows=run($db,'SELECT user_id,presence_json FROM whiteboard_presence WHERE board_id=? AND user_id<>? AND last_seen>=?',[$id,$user['id'],time()-5])->fetchAll();
+            reply(['peers'=>array_map(static fn(array $row)=>['user_id'=>(int)$row['user_id'],'presence'=>json_decode($row['presence_json'],true)],$rows)]);
         }
         fail('Неизвестное действие.',404);
     }

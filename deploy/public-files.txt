@@ -5,12 +5,15 @@ assets/bank.js
 assets/builder.js
 assets/classwork.js
 assets/editor.js
+assets/excalidraw-license.txt
 assets/favicon.svg
 assets/homework.js
 assets/kourage-turtle.txt
 assets/meeting.js
 assets/python-worker.js
 assets/style.css
+assets/whiteboard-app.css
+assets/whiteboard-app.js
 assets/whiteboard.js
 bank.html
 builder.html
@@ -19,4 +22,5 @@ editor.html
 homework.html
 index.html
 meeting.html
+whiteboard-app.html
 whiteboard.html
