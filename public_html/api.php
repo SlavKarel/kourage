@@ -167,6 +167,7 @@ try {
     $whiteboardColumns=array_column($db->query('PRAGMA table_info(whiteboards)')->fetchAll(),'name');
     if(!in_array('provider',$whiteboardColumns,true))$db->exec("ALTER TABLE whiteboards ADD COLUMN provider TEXT NOT NULL DEFAULT 'wbo'");
     if(!in_array('sync_revision',$whiteboardColumns,true))$db->exec('ALTER TABLE whiteboards ADD COLUMN sync_revision INTEGER NOT NULL DEFAULT 0');
+    $db->exec("DELETE FROM whiteboards WHERE provider IN ('wbo','tldraw')");
     if (is_file($private.'/kourage.sqlite')) @chmod($private.'/kourage.sqlite',0600);
     run($db,'DELETE FROM remember_tokens WHERE expires_at < ?',[time()]);
     $_SESSION['csrf'] ??= bin2hex(random_bytes(24));
@@ -270,12 +271,11 @@ try {
             $id=idValue($data,'id');
             $board=$boardForUser($id);
             run($db,"UPDATE whiteboards SET updated_at=strftime('%Y-%m-%dT%H:%M:%SZ','now') WHERE id=?",[$id]);
-            $url=in_array($board['provider'],['excalidraw','tldraw'],true)?'whiteboard-app.html?board='.$id:'https://wbo.ophir.dev/boards/'.rawurlencode($board['board_key']);
-            reply(['id'=>(int)$board['id'],'title'=>$board['title'],'provider'=>$board['provider'],'url'=>$url]);
+            reply(['id'=>(int)$board['id'],'title'=>$board['title'],'provider'=>$board['provider'],'url'=>'whiteboard-app.html?board='.$id]);
         }
         if($action==='whiteboard_document'){
             $id=filter_input(INPUT_GET,'board',FILTER_VALIDATE_INT);if(!$id)fail('Некорректная доска.');
-            $board=$boardForUser((int)$id);if(!in_array($board['provider'],['excalidraw','tldraw'],true))fail('Эта доска использует прежний редактор.',409);
+            $board=$boardForUser((int)$id);if($board['provider']!=='excalidraw')fail('Доска недоступна.',409);
             $hasSince=array_key_exists('since',$_GET);$since=max(0,(int)(filter_input(INPUT_GET,'since',FILTER_VALIDATE_INT)?:0));$revision=(int)$board['sync_revision'];
             $minRevision=(int)(run($db,'SELECT MIN(revision) FROM whiteboard_changes WHERE board_id=?',[$id])->fetchColumn()?:0);
             $reset=!$hasSince||($minRevision>0&&$since<$minRevision-1);
@@ -284,7 +284,7 @@ try {
             reply(['board'=>['id'=>(int)$board['id'],'title'=>$board['title']],'user'=>publicUser($user),'csrf'=>$_SESSION['csrf'],'revision'=>$revision,'reset'=>$reset,'records'=>$records,'events'=>$events]);
         }
         if($action==='whiteboard_sync'){
-            $id=idValue($data,'board_id');$board=$boardForUser($id);if(!in_array($board['provider'],['excalidraw','tldraw'],true))fail('Эта доска использует прежний редактор.',409);
+            $id=idValue($data,'board_id');$board=$boardForUser($id);if($board['provider']!=='excalidraw')fail('Доска недоступна.',409);
             $since=max(0,(int)($data['since']??0));$changed=$data['changed']??[];$removed=$data['removed']??[];
             if(!is_array($changed)||!is_array($removed)||count($changed)>1500||count($removed)>1500)fail('Слишком много изменений.',413);
             foreach($changed as $record)if(!is_array($record)||!isset($record['id'])||!is_string($record['id'])||strlen($record['id'])>240)fail('Некорректные данные доски.');
@@ -301,7 +301,7 @@ try {
             reply(['revision'=>$revision,'events'=>$events]);
         }
         if($action==='whiteboard_presence'){
-            $id=idValue($data,'board_id');$board=$boardForUser($id);if(!in_array($board['provider'],['excalidraw','tldraw'],true))fail('Эта доска использует прежний редактор.',409);
+            $id=idValue($data,'board_id');$board=$boardForUser($id);if($board['provider']!=='excalidraw')fail('Доска недоступна.',409);
             $presence=$data['presence']??null;if(!is_array($presence))fail('Некорректное присутствие.');
             $encoded=json_encode($presence,JSON_UNESCAPED_UNICODE|JSON_UNESCAPED_SLASHES);if(strlen($encoded)>50000)fail('Слишком много данных присутствия.',413);
             run($db,'INSERT INTO whiteboard_presence(board_id,user_id,presence_json,last_seen) VALUES(?,?,?,?) ON CONFLICT(board_id,user_id) DO UPDATE SET presence_json=excluded.presence_json,last_seen=excluded.last_seen',[$id,$user['id'],$encoded,time()]);
