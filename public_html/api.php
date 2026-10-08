@@ -784,6 +784,20 @@ try {
         run($db,"INSERT INTO users(name,login,password_hash,role) VALUES(?,?,?,'admin')",[$name,$login,password_hash($password,PASSWORD_DEFAULT)]);
         reply(['id'=>(int)$db->lastInsertId(),'name'=>$name,'login'=>$login,'role'=>'admin','password'=>$password],201);
     }
+    if ($action === 'reset_teacher_password') {
+        requireOwner($db,$user); $id=idValue($data,'id');
+        if ($id === (int)$user['id']) fail('Свой пароль можно изменить в настройках профиля.',409);
+        $teacher=run($db,"SELECT id,name,login FROM users WHERE id=? AND role='admin' AND deleted_at IS NULL",[$id])->fetch();
+        if(!$teacher)fail('Преподаватель не найден.',404);
+        $password=bin2hex(random_bytes(8));
+        $db->exec('BEGIN IMMEDIATE');
+        try{
+            run($db,'UPDATE users SET password_hash=?,auth_version=auth_version+1 WHERE id=?',[password_hash($password,PASSWORD_DEFAULT),$id]);
+            run($db,'DELETE FROM remember_tokens WHERE user_id=?',[$id]);
+            $db->exec('COMMIT');
+        }catch(Throwable $error){if($db->inTransaction())$db->exec('ROLLBACK');throw $error;}
+        reply(['id'=>$id,'login'=>$teacher['login'],'name'=>$teacher['name'],'role'=>'admin','password'=>$password]);
+    }
     if ($action === 'student_access' || $action === 'reset_password') {
         requireAdmin($user); $id = idValue($data,'id');
         $student = requireOwnedStudent($db,$user,$id);
