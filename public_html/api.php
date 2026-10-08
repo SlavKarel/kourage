@@ -47,10 +47,24 @@ function requireOwner(PDO $db, array $user): void {
 }
 function requireOwnedStudent(PDO $db, array $user, int $studentId, bool $activeOnly = false): array {
     requireAdmin($user);
-    $sql = "SELECT * FROM users WHERE id=? AND role='student' AND teacher_id=? AND deleted_at IS NULL".($activeOnly?' AND active=1':'');
+    $sql = "SELECT u.* FROM users u JOIN student_teachers st ON st.student_id=u.id WHERE u.id=? AND u.role='student' AND st.teacher_id=? AND u.deleted_at IS NULL".($activeOnly?' AND u.active=1':'');
     $student = run($db,$sql,[$studentId,$user['id']])->fetch();
     if (!$student) fail($activeOnly?'Активный ученик не найден.':'Ученик не найден.',404);
     return $student;
+}
+function studentContexts(PDO $db, array $user): array {
+    if ($user['role'] !== 'student') return [];
+    return run($db,"SELECT st.teacher_id,st.subject,u.name AS teacher_name FROM student_teachers st JOIN users u ON u.id=st.teacher_id WHERE st.student_id=? AND u.role='admin' AND u.active=1 AND u.deleted_at IS NULL ORDER BY st.created_at,st.teacher_id",[$user['id']])->fetchAll();
+}
+function activeTeacherId(PDO $db, array $user): int {
+    if ($user['role'] === 'admin') return (int)$user['id'];
+    $contexts=studentContexts($db,$user);
+    if (!$contexts) return (int)($user['teacher_id'] ?? 0);
+    $selected=(int)($_SESSION['teacher_context_id'] ?? 0);
+    foreach($contexts as $context) if((int)$context['teacher_id']===$selected) return $selected;
+    $selected=(int)$contexts[0]['teacher_id'];
+    $_SESSION['teacher_context_id']=$selected;
+    return $selected;
 }
 function validLink(string $url): string {
     if ($url !== '' && (!filter_var($url, FILTER_VALIDATE_URL) || !in_array(strtolower((string)parse_url($url,PHP_URL_SCHEME)), ['http','https'],true))) fail('Укажите ссылку, начинающуюся с https:// или http://.');
@@ -71,8 +85,8 @@ function normalizedAnswer(string $value): string {
     $value = trim((string)preg_replace('/\s+/u',' ',$value));
     return function_exists('mb_strtolower') ? mb_strtolower($value,'UTF-8') : strtolower($value);
 }
-function editorAssignment(PDO $db, int $studentId): ?array {
-    $assignment = run($db,'SELECT student_id,bank_item_id,title,prompt,correct_answer,explanation,updated_at FROM editor_assignments WHERE student_id=?',[$studentId])->fetch();
+function editorAssignment(PDO $db, int $studentId, int $teacherId): ?array {
+    $assignment = run($db,'SELECT student_id,bank_item_id,title,prompt,correct_answer,explanation,updated_at FROM editor_assignments_context WHERE student_id=? AND teacher_id=?',[$studentId,$teacherId])->fetch();
     if (!$assignment) return null;
     $assignment['student_id'] = (int)$assignment['student_id'];
     $assignment['bank_item_id'] = $assignment['bank_item_id'] === null ? null : (int)$assignment['bank_item_id'];
@@ -122,22 +136,24 @@ try {
     $db = new PDO('sqlite:'.$private.'/kourage.sqlite', null, null, [PDO::ATTR_ERRMODE=>PDO::ERRMODE_EXCEPTION,PDO::ATTR_DEFAULT_FETCH_MODE=>PDO::FETCH_ASSOC]);
     $db->exec('PRAGMA foreign_keys=ON; PRAGMA busy_timeout=5000;');
     $db->exec("CREATE TABLE IF NOT EXISTS users (id INTEGER PRIMARY KEY, name TEXT NOT NULL, login TEXT NOT NULL UNIQUE COLLATE NOCASE, password_hash TEXT NOT NULL, role TEXT NOT NULL CHECK(role IN ('admin','student')), teacher_id INTEGER, active INTEGER NOT NULL DEFAULT 1, auth_version INTEGER NOT NULL DEFAULT 1, created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now')));
-    CREATE TABLE IF NOT EXISTS tasks (id INTEGER PRIMARY KEY, student_id INTEGER NOT NULL REFERENCES users(id), title TEXT NOT NULL, subject TEXT NOT NULL, description TEXT NOT NULL, resource_url TEXT NOT NULL DEFAULT '', due_date TEXT NOT NULL DEFAULT '', status TEXT NOT NULL DEFAULT 'assigned' CHECK(status IN ('assigned','submitted','revision','done')), solution TEXT NOT NULL DEFAULT '', solution_url TEXT NOT NULL DEFAULT '', feedback TEXT NOT NULL DEFAULT '', score INTEGER, max_score INTEGER NOT NULL DEFAULT 10, submitted_at TEXT, completed_at TEXT, created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now')), updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now')));
+    CREATE TABLE IF NOT EXISTS student_teachers (student_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE, teacher_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE, subject TEXT NOT NULL DEFAULT 'Информатика', created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now')), PRIMARY KEY(student_id,teacher_id));
+    CREATE INDEX IF NOT EXISTS idx_student_teachers_teacher ON student_teachers(teacher_id,student_id);
+    CREATE TABLE IF NOT EXISTS tasks (id INTEGER PRIMARY KEY, student_id INTEGER NOT NULL REFERENCES users(id), teacher_id INTEGER REFERENCES users(id), title TEXT NOT NULL, subject TEXT NOT NULL, description TEXT NOT NULL, resource_url TEXT NOT NULL DEFAULT '', due_date TEXT NOT NULL DEFAULT '', status TEXT NOT NULL DEFAULT 'assigned' CHECK(status IN ('assigned','submitted','revision','done')), solution TEXT NOT NULL DEFAULT '', solution_url TEXT NOT NULL DEFAULT '', feedback TEXT NOT NULL DEFAULT '', score INTEGER, max_score INTEGER NOT NULL DEFAULT 10, submitted_at TEXT, completed_at TEXT, created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now')), updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now')));
     CREATE INDEX IF NOT EXISTS idx_tasks_student_updated ON tasks(student_id, updated_at DESC);
     CREATE TABLE IF NOT EXISTS attachments (id INTEGER PRIMARY KEY, task_id INTEGER NOT NULL REFERENCES tasks(id), uploader_id INTEGER NOT NULL REFERENCES users(id), kind TEXT NOT NULL CHECK(kind IN ('material','solution')), name TEXT NOT NULL, storage_name TEXT NOT NULL UNIQUE, size INTEGER NOT NULL, deleted INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now')));
     CREATE INDEX IF NOT EXISTS idx_attachments_task ON attachments(task_id,deleted);
     CREATE TABLE IF NOT EXISTS classwork_files (id INTEGER PRIMARY KEY, student_id INTEGER NOT NULL REFERENCES users(id), uploader_id INTEGER NOT NULL REFERENCES users(id), name TEXT NOT NULL, relative_path TEXT NOT NULL, storage_name TEXT NOT NULL UNIQUE, size INTEGER NOT NULL, deleted INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now')));
     CREATE INDEX IF NOT EXISTS idx_classwork_student ON classwork_files(student_id,deleted,relative_path);
-    CREATE TABLE IF NOT EXISTS editor_presence (student_id INTEGER NOT NULL REFERENCES users(id), user_id INTEGER NOT NULL REFERENCES users(id), file_id INTEGER, cursor_start INTEGER NOT NULL DEFAULT 0, cursor_end INTEGER NOT NULL DEFAULT 0, last_seen INTEGER NOT NULL, PRIMARY KEY(student_id,user_id));
-    CREATE INDEX IF NOT EXISTS idx_editor_presence_seen ON editor_presence(student_id,last_seen);
-    CREATE TABLE IF NOT EXISTS editor_runs (student_id INTEGER PRIMARY KEY REFERENCES users(id), file_id INTEGER NOT NULL REFERENCES classwork_files(id), run_id TEXT NOT NULL, runner_id INTEGER NOT NULL REFERENCES users(id), status TEXT NOT NULL CHECK(status IN ('running','done','error','stopped')), stdin TEXT NOT NULL DEFAULT '', output TEXT NOT NULL DEFAULT '', updated_at INTEGER NOT NULL);
+    CREATE TABLE IF NOT EXISTS editor_presence_context (student_id INTEGER NOT NULL REFERENCES users(id), teacher_id INTEGER NOT NULL REFERENCES users(id), user_id INTEGER NOT NULL REFERENCES users(id), file_id INTEGER, cursor_start INTEGER NOT NULL DEFAULT 0, cursor_end INTEGER NOT NULL DEFAULT 0, last_seen INTEGER NOT NULL, PRIMARY KEY(student_id,teacher_id,user_id));
+    CREATE INDEX IF NOT EXISTS idx_editor_presence_context_seen ON editor_presence_context(student_id,teacher_id,last_seen);
+    CREATE TABLE IF NOT EXISTS editor_runs_context (student_id INTEGER NOT NULL REFERENCES users(id), teacher_id INTEGER NOT NULL REFERENCES users(id), file_id INTEGER NOT NULL REFERENCES classwork_files(id), run_id TEXT NOT NULL, runner_id INTEGER NOT NULL REFERENCES users(id), status TEXT NOT NULL CHECK(status IN ('running','done','error','stopped')), stdin TEXT NOT NULL DEFAULT '', output TEXT NOT NULL DEFAULT '', updated_at INTEGER NOT NULL, PRIMARY KEY(student_id,teacher_id));
     CREATE TABLE IF NOT EXISTS remember_tokens (selector TEXT PRIMARY KEY, user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE, token_hash TEXT NOT NULL, auth_version INTEGER NOT NULL, expires_at INTEGER NOT NULL, last_used_at INTEGER NOT NULL DEFAULT (strftime('%s','now')));
     CREATE INDEX IF NOT EXISTS idx_remember_user ON remember_tokens(user_id);
     CREATE TABLE IF NOT EXISTS question_bank (id INTEGER PRIMARY KEY, teacher_id INTEGER NOT NULL REFERENCES users(id), title TEXT NOT NULL, subject TEXT NOT NULL, topic TEXT NOT NULL DEFAULT '', exam_number INTEGER CHECK(exam_number BETWEEN 1 AND 27), difficulty TEXT NOT NULL DEFAULT 'medium' CHECK(difficulty IN ('easy','medium','hard')), prompt TEXT NOT NULL, correct_answer TEXT NOT NULL, explanation TEXT NOT NULL DEFAULT '', default_score INTEGER NOT NULL DEFAULT 1, created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now')), updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now')), deleted_at TEXT);
     CREATE INDEX IF NOT EXISTS idx_question_bank_teacher ON question_bank(teacher_id,deleted_at,updated_at DESC);
     CREATE TABLE IF NOT EXISTS question_bank_files (id INTEGER PRIMARY KEY, bank_item_id INTEGER NOT NULL REFERENCES question_bank(id), uploader_id INTEGER NOT NULL REFERENCES users(id), name TEXT NOT NULL, storage_name TEXT NOT NULL UNIQUE, size INTEGER NOT NULL, mime TEXT NOT NULL DEFAULT 'application/octet-stream', deleted INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now')));
     CREATE INDEX IF NOT EXISTS idx_question_bank_files_item ON question_bank_files(bank_item_id,deleted,id);
-    CREATE TABLE IF NOT EXISTS editor_assignments (student_id INTEGER PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE, teacher_id INTEGER NOT NULL REFERENCES users(id), bank_item_id INTEGER REFERENCES question_bank(id), title TEXT NOT NULL, prompt TEXT NOT NULL, correct_answer TEXT NOT NULL DEFAULT '', explanation TEXT NOT NULL DEFAULT '', updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now')));
+    CREATE TABLE IF NOT EXISTS editor_assignments_context (student_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE, teacher_id INTEGER NOT NULL REFERENCES users(id), bank_item_id INTEGER REFERENCES question_bank(id), title TEXT NOT NULL, prompt TEXT NOT NULL, correct_answer TEXT NOT NULL DEFAULT '', explanation TEXT NOT NULL DEFAULT '', updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now')), PRIMARY KEY(student_id,teacher_id));
     CREATE TABLE IF NOT EXISTS homeworks (id INTEGER PRIMARY KEY, student_id INTEGER NOT NULL REFERENCES users(id), created_by INTEGER NOT NULL REFERENCES users(id), group_id TEXT, title TEXT NOT NULL, subject TEXT NOT NULL, description TEXT NOT NULL DEFAULT '', due_date TEXT NOT NULL DEFAULT '', status TEXT NOT NULL DEFAULT 'assigned' CHECK(status IN ('assigned','submitted','revision','done')), feedback TEXT NOT NULL DEFAULT '', score INTEGER, max_score INTEGER NOT NULL DEFAULT 1, submitted_at TEXT, completed_at TEXT, created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now')), updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now')), deleted_at TEXT);
     CREATE INDEX IF NOT EXISTS idx_homeworks_student ON homeworks(student_id,deleted_at,updated_at DESC);
     CREATE INDEX IF NOT EXISTS idx_homeworks_group ON homeworks(group_id);
@@ -160,10 +176,14 @@ try {
     if (!in_array('deleted_at',$userColumns,true)) $db->exec('ALTER TABLE users ADD COLUMN deleted_at TEXT');
     if (!in_array('teacher_id',$userColumns,true)) $db->exec('ALTER TABLE users ADD COLUMN teacher_id INTEGER');
     $db->exec("UPDATE users SET teacher_id=(SELECT MIN(id) FROM users WHERE role='admin' AND deleted_at IS NULL) WHERE role='student' AND teacher_id IS NULL");
+    $db->exec("INSERT OR IGNORE INTO student_teachers(student_id,teacher_id,subject) SELECT id,teacher_id,'Информатика' FROM users WHERE role='student' AND teacher_id IS NOT NULL AND deleted_at IS NULL");
     $db->exec('CREATE INDEX IF NOT EXISTS idx_users_teacher ON users(teacher_id,role,deleted_at,active,name)');
     $taskColumns = array_column($db->query('PRAGMA table_info(tasks)')->fetchAll(),'name');
     if (!in_array('deleted_at',$taskColumns,true)) $db->exec('ALTER TABLE tasks ADD COLUMN deleted_at TEXT');
     if (!in_array('group_id',$taskColumns,true)) $db->exec('ALTER TABLE tasks ADD COLUMN group_id TEXT');
+    if (!in_array('teacher_id',$taskColumns,true)) $db->exec('ALTER TABLE tasks ADD COLUMN teacher_id INTEGER REFERENCES users(id)');
+    $db->exec('UPDATE tasks SET teacher_id=(SELECT teacher_id FROM users WHERE users.id=tasks.student_id) WHERE teacher_id IS NULL');
+    $db->exec('CREATE INDEX IF NOT EXISTS idx_tasks_teacher ON tasks(teacher_id,deleted_at,updated_at DESC)');
     $db->exec('CREATE INDEX IF NOT EXISTS idx_tasks_group ON tasks(group_id)');
     $attachmentColumns=array_column($db->query('PRAGMA table_info(attachments)')->fetchAll(),'name');
     if(!in_array('relative_path',$attachmentColumns,true))$db->exec('ALTER TABLE attachments ADD COLUMN relative_path TEXT');
@@ -171,9 +191,16 @@ try {
     $bankColumns=array_column($db->query('PRAGMA table_info(question_bank)')->fetchAll(),'name');
     if(!in_array('exam_number',$bankColumns,true))$db->exec('ALTER TABLE question_bank ADD COLUMN exam_number INTEGER');
     $classworkColumns=array_column($db->query('PRAGMA table_info(classwork_files)')->fetchAll(),'name');
+    if(!in_array('teacher_id',$classworkColumns,true))$db->exec('ALTER TABLE classwork_files ADD COLUMN teacher_id INTEGER REFERENCES users(id)');
     if(!in_array('revision',$classworkColumns,true))$db->exec('ALTER TABLE classwork_files ADD COLUMN revision INTEGER NOT NULL DEFAULT 1');
     if(!in_array('updated_at',$classworkColumns,true))$db->exec("ALTER TABLE classwork_files ADD COLUMN updated_at TEXT");
     $db->exec("UPDATE classwork_files SET updated_at=created_at WHERE updated_at IS NULL OR updated_at=''");
+    $db->exec('UPDATE classwork_files SET teacher_id=(SELECT teacher_id FROM users WHERE users.id=classwork_files.student_id) WHERE teacher_id IS NULL');
+    $db->exec('CREATE INDEX IF NOT EXISTS idx_classwork_teacher_student ON classwork_files(teacher_id,student_id,deleted,relative_path)');
+    $legacyTables=array_column($db->query("SELECT name FROM sqlite_master WHERE type='table' AND name IN ('editor_assignments','editor_presence','editor_runs')")->fetchAll(),'name');
+    if(in_array('editor_assignments',$legacyTables,true)&&(int)$db->query('SELECT COUNT(*) FROM editor_assignments_context')->fetchColumn()===0)$db->exec('INSERT OR IGNORE INTO editor_assignments_context(student_id,teacher_id,bank_item_id,title,prompt,correct_answer,explanation,updated_at) SELECT student_id,teacher_id,bank_item_id,title,prompt,correct_answer,explanation,updated_at FROM editor_assignments');
+    if(in_array('editor_presence',$legacyTables,true)&&(int)$db->query('SELECT COUNT(*) FROM editor_presence_context')->fetchColumn()===0)$db->exec('INSERT OR IGNORE INTO editor_presence_context(student_id,teacher_id,user_id,file_id,cursor_start,cursor_end,last_seen) SELECT p.student_id,COALESCE(f.teacher_id,u.teacher_id),p.user_id,p.file_id,p.cursor_start,p.cursor_end,p.last_seen FROM editor_presence p JOIN users u ON u.id=p.student_id LEFT JOIN classwork_files f ON f.id=p.file_id WHERE COALESCE(f.teacher_id,u.teacher_id) IS NOT NULL');
+    if(in_array('editor_runs',$legacyTables,true)&&(int)$db->query('SELECT COUNT(*) FROM editor_runs_context')->fetchColumn()===0)$db->exec('INSERT OR IGNORE INTO editor_runs_context(student_id,teacher_id,file_id,run_id,runner_id,status,stdin,output,updated_at) SELECT r.student_id,COALESCE(f.teacher_id,u.teacher_id),r.file_id,r.run_id,r.runner_id,r.status,r.stdin,r.output,r.updated_at FROM editor_runs r JOIN users u ON u.id=r.student_id LEFT JOIN classwork_files f ON f.id=r.file_id WHERE COALESCE(f.teacher_id,u.teacher_id) IS NOT NULL');
     $whiteboardColumns=array_column($db->query('PRAGMA table_info(whiteboards)')->fetchAll(),'name');
     if(!in_array('provider',$whiteboardColumns,true))$db->exec("ALTER TABLE whiteboards ADD COLUMN provider TEXT NOT NULL DEFAULT 'wbo'");
     if(!in_array('sync_revision',$whiteboardColumns,true))$db->exec('ALTER TABLE whiteboards ADD COLUMN sync_revision INTEGER NOT NULL DEFAULT 0');
@@ -252,13 +279,13 @@ try {
         };
         if($action==='whiteboard_state'){
             if($user['role']==='admin'){
-                $students=run($db,"SELECT id,name,login,active FROM users WHERE role='student' AND teacher_id=? AND deleted_at IS NULL ORDER BY active DESC,name",[$user['id']])->fetchAll();
+                $students=run($db,"SELECT u.id,u.name,u.login,u.active FROM users u JOIN student_teachers st ON st.student_id=u.id WHERE u.role='student' AND st.teacher_id=? AND u.deleted_at IS NULL ORDER BY u.active DESC,u.name",[$user['id']])->fetchAll();
                 $studentId=filter_input(INPUT_GET,'student_id',FILTER_VALIDATE_INT)?:((int)($students[0]['id']??0));
                 if($studentId)requireOwnedStudent($db,$user,(int)$studentId);
                 $boards=$studentId?run($db,"SELECT id,student_id,title,provider,created_at,updated_at FROM whiteboards WHERE teacher_id=? AND student_id=? AND deleted_at IS NULL ORDER BY updated_at DESC,id DESC",[$user['id'],$studentId])->fetchAll():[];
                 reply(['user'=>publicUser($user),'students'=>$students,'student_id'=>$studentId,'boards'=>$boards,'csrf'=>$_SESSION['csrf']]);
             }
-            $boards=run($db,"SELECT id,student_id,title,provider,created_at,updated_at FROM whiteboards WHERE student_id=? AND deleted_at IS NULL ORDER BY updated_at DESC,id DESC",[$user['id']])->fetchAll();
+            $boards=run($db,"SELECT id,student_id,title,provider,created_at,updated_at FROM whiteboards WHERE student_id=? AND teacher_id=? AND deleted_at IS NULL ORDER BY updated_at DESC,id DESC",[$user['id'],activeTeacherId($db,$user)])->fetchAll();
             reply(['user'=>publicUser($user),'students'=>[],'student_id'=>(int)$user['id'],'boards'=>$boards,'csrf'=>$_SESSION['csrf']]);
         }
         if($action==='whiteboard_create'){
@@ -325,11 +352,11 @@ try {
         run($db,"UPDATE meetings SET status='ended',ended_at=COALESCE(ended_at,strftime('%Y-%m-%dT%H:%M:%SZ','now')) WHERE status='active' AND expires_at<=?",[time()]);
         if($action==='meeting_state'){
             if($user['role']==='admin'){
-                $students=run($db,"SELECT id,name,login,active FROM users WHERE role='student' AND teacher_id=? AND deleted_at IS NULL ORDER BY active DESC,name",[$user['id']])->fetchAll();
+                $students=run($db,"SELECT u.id,u.name,u.login,u.active FROM users u JOIN student_teachers st ON st.student_id=u.id WHERE u.role='student' AND st.teacher_id=? AND u.deleted_at IS NULL ORDER BY u.active DESC,u.name",[$user['id']])->fetchAll();
                 $meetings=run($db,"SELECT m.id,m.student_id,m.status,m.expires_at,m.created_at,u.name AS student_name FROM meetings m JOIN users u ON u.id=m.student_id WHERE m.teacher_id=? AND m.status='active' ORDER BY m.created_at DESC",[$user['id']])->fetchAll();
                 reply(['user'=>publicUser($user),'students'=>$students,'meetings'=>$meetings,'configured'=>true,'csrf'=>$_SESSION['csrf']]);
             }
-            $meeting=run($db,"SELECT m.id,m.status,m.expires_at,m.created_at,u.name AS teacher_name FROM meetings m JOIN users u ON u.id=m.teacher_id WHERE m.student_id=? AND m.status='active' ORDER BY m.id DESC LIMIT 1",[$user['id']])->fetch()?:null;
+            $meeting=run($db,"SELECT m.id,m.status,m.expires_at,m.created_at,u.name AS teacher_name FROM meetings m JOIN users u ON u.id=m.teacher_id WHERE m.student_id=? AND m.teacher_id=? AND m.status='active' ORDER BY m.id DESC LIMIT 1",[$user['id'],activeTeacherId($db,$user)])->fetch()?:null;
             reply(['user'=>publicUser($user),'students'=>[],'meetings'=>$meeting?[$meeting]:[],'configured'=>true,'csrf'=>$_SESSION['csrf']]);
         }
         if($action==='meeting_create'){
@@ -368,7 +395,7 @@ try {
         }
         $taskId = $attachment ? (int)$attachment['task_id'] : idValue($data,'task_id');
         $task = $user['role'] === 'admin'
-            ? run($db,"SELECT t.* FROM tasks t JOIN users s ON s.id=t.student_id WHERE t.id=? AND s.teacher_id=? AND t.deleted_at IS NULL AND s.deleted_at IS NULL",[$taskId,$user['id']])->fetch()
+            ? run($db,"SELECT t.* FROM tasks t JOIN users s ON s.id=t.student_id WHERE t.id=? AND t.teacher_id=? AND t.deleted_at IS NULL AND s.deleted_at IS NULL",[$taskId,$user['id']])->fetch()
             : run($db,'SELECT * FROM tasks WHERE id=? AND student_id=? AND deleted_at IS NULL',[$taskId,$user['id']])->fetch();
         if (!$task) fail('Файл или задание не найдено.',404);
         $directory = $private.'/uploads';
@@ -437,52 +464,53 @@ try {
         $editable=['','txt','csv','md','py','js','ts','jsx','tsx','html','css','json','xml','yaml','yml','sql','java','c','cpp','h','hpp','cs','go','rs','php','sh','ini','toml'];
         $editorSource=$method==='GET'?$_GET:$data;
         $studentId=$user['role']==='admin'?(isset($editorSource['student_id'])?idValue($editorSource,'student_id'):0):(int)$user['id'];
-        if($user['role']==='admin'&&$studentId===0&&$action==='editor_state')$studentId=(int)(run($db,"SELECT id FROM users WHERE role='student' AND teacher_id=? AND active=1 AND deleted_at IS NULL ORDER BY name LIMIT 1",[$user['id']])->fetchColumn()?:0);
+        if($user['role']==='admin'&&$studentId===0&&$action==='editor_state')$studentId=(int)(run($db,"SELECT u.id FROM users u JOIN student_teachers st ON st.student_id=u.id WHERE u.role='student' AND st.teacher_id=? AND u.active=1 AND u.deleted_at IS NULL ORDER BY u.name LIMIT 1",[$user['id']])->fetchColumn()?:0);
         if($user['role']==='admin'&&$studentId)requireOwnedStudent($db,$user,$studentId,true);
         if($user['role']==='student'&&$studentId&&!run($db,"SELECT id FROM users WHERE id=? AND role='student' AND active=1 AND deleted_at IS NULL",[$studentId])->fetch())fail('Активный ученик не найден.',404);
+        $editorTeacherId=activeTeacherId($db,$user);
         $directory=$private.'/classwork_uploads';
         if($action==='editor_state'){
-            $students=$user['role']==='admin'?run($db,"SELECT id,name,login,active FROM users WHERE role='student' AND teacher_id=? AND deleted_at IS NULL ORDER BY active DESC,name",[$user['id']])->fetchAll():[];
-            $files=$studentId?run($db,'SELECT id,student_id,name,relative_path,size,revision,updated_at,created_at FROM classwork_files WHERE student_id=? AND deleted=0 ORDER BY relative_path',[$studentId])->fetchAll():[];
-            run($db,'DELETE FROM editor_presence WHERE last_seen < ?',[time()-45]);
-            $presence=$studentId?run($db,"SELECT p.user_id,p.file_id,p.cursor_start,p.cursor_end,p.last_seen,u.name,u.role FROM editor_presence p JOIN users u ON u.id=p.user_id WHERE p.student_id=? AND p.last_seen>=? ORDER BY u.role,u.name",[$studentId,time()-45])->fetchAll():[];
-            reply(['user'=>publicUser($user),'students'=>$students,'student_id'=>$studentId,'files'=>$files,'presence'=>$presence,'assignment'=>$studentId?editorAssignment($db,$studentId):null,'csrf'=>$_SESSION['csrf']]);
+            $students=$user['role']==='admin'?run($db,"SELECT u.id,u.name,u.login,u.active FROM users u JOIN student_teachers st ON st.student_id=u.id WHERE u.role='student' AND st.teacher_id=? AND u.deleted_at IS NULL ORDER BY u.active DESC,u.name",[$user['id']])->fetchAll():[];
+            $files=$studentId?run($db,'SELECT id,student_id,name,relative_path,size,revision,updated_at,created_at FROM classwork_files WHERE student_id=? AND teacher_id=? AND deleted=0 ORDER BY relative_path',[$studentId,$editorTeacherId])->fetchAll():[];
+            run($db,'DELETE FROM editor_presence_context WHERE last_seen < ?',[time()-45]);
+            $presence=$studentId?run($db,"SELECT p.user_id,p.file_id,p.cursor_start,p.cursor_end,p.last_seen,u.name,u.role FROM editor_presence_context p JOIN users u ON u.id=p.user_id WHERE p.student_id=? AND p.teacher_id=? AND p.last_seen>=? ORDER BY u.role,u.name",[$studentId,$editorTeacherId,time()-45])->fetchAll():[];
+            reply(['user'=>publicUser($user),'students'=>$students,'student_id'=>$studentId,'files'=>$files,'presence'=>$presence,'assignment'=>$studentId?editorAssignment($db,$studentId,$editorTeacherId):null,'csrf'=>$_SESSION['csrf']]);
         }
         if(!$studentId)fail('Сначала выберите ученика.',400);
         if($action==='editor_file'){
-            $record=run($db,'SELECT * FROM classwork_files WHERE id=? AND student_id=? AND deleted=0',[idValue($_GET,'id'),$studentId])->fetch();
+            $record=run($db,'SELECT * FROM classwork_files WHERE id=? AND student_id=? AND teacher_id=? AND deleted=0',[idValue($_GET,'id'),$studentId,$editorTeacherId])->fetch();
             if(!$record)fail('Файл не найден.',404);$ext=strtolower(pathinfo($record['name'],PATHINFO_EXTENSION));if(!in_array($ext,$editable,true))fail('Этот файл нельзя редактировать в браузере.',415);
             $path=$directory.'/'.$record['storage_name'];if(!is_file($path))fail('Файл отсутствует на сервере.',404);$size=filesize($path);if($size===false||$size>200000)fail('В редакторе можно открыть текстовый файл не больше 200 КБ.',413);$content=file_get_contents($path);if($content===false||!preg_match('//u',$content))fail('Файл не является текстовым.',415);
             reply(['id'=>(int)$record['id'],'student_id'=>(int)$record['student_id'],'name'=>$record['name'],'path'=>$record['relative_path'],'content'=>$content,'revision'=>(int)$record['revision'],'updated_at'=>$record['updated_at']]);
         }
         if($action==='editor_presence'){
             $fileId=isset($data['file_id'])&&$data['file_id']!==null?(int)$data['file_id']:null;if($fileId!==null&&$fileId<1)fail('Некорректный файл.');
-            if($fileId&&!run($db,'SELECT id FROM classwork_files WHERE id=? AND student_id=? AND deleted=0',[$fileId,$studentId])->fetch())fail('Файл не найден.',404);
+            if($fileId&&!run($db,'SELECT id FROM classwork_files WHERE id=? AND student_id=? AND teacher_id=? AND deleted=0',[$fileId,$studentId,$editorTeacherId])->fetch())fail('Файл не найден.',404);
             $cursorStart=max(0,min(200000,(int)($data['cursor_start']??0)));$cursorEnd=max($cursorStart,min(200000,(int)($data['cursor_end']??$cursorStart)));
-            run($db,'INSERT INTO editor_presence(student_id,user_id,file_id,cursor_start,cursor_end,last_seen) VALUES(?,?,?,?,?,?) ON CONFLICT(student_id,user_id) DO UPDATE SET file_id=excluded.file_id,cursor_start=excluded.cursor_start,cursor_end=excluded.cursor_end,last_seen=excluded.last_seen',[$studentId,$user['id'],$fileId,$cursorStart,$cursorEnd,time()]);
-            run($db,'DELETE FROM editor_presence WHERE last_seen < ?',[time()-45]);
-            $presence=run($db,"SELECT p.user_id,p.file_id,p.cursor_start,p.cursor_end,p.last_seen,u.name,u.role FROM editor_presence p JOIN users u ON u.id=p.user_id WHERE p.student_id=? AND p.last_seen>=? ORDER BY u.role,u.name",[$studentId,time()-45])->fetchAll();
+            run($db,'INSERT INTO editor_presence_context(student_id,teacher_id,user_id,file_id,cursor_start,cursor_end,last_seen) VALUES(?,?,?,?,?,?,?) ON CONFLICT(student_id,teacher_id,user_id) DO UPDATE SET file_id=excluded.file_id,cursor_start=excluded.cursor_start,cursor_end=excluded.cursor_end,last_seen=excluded.last_seen',[$studentId,$editorTeacherId,$user['id'],$fileId,$cursorStart,$cursorEnd,time()]);
+            run($db,'DELETE FROM editor_presence_context WHERE last_seen < ?',[time()-45]);
+            $presence=run($db,"SELECT p.user_id,p.file_id,p.cursor_start,p.cursor_end,p.last_seen,u.name,u.role FROM editor_presence_context p JOIN users u ON u.id=p.user_id WHERE p.student_id=? AND p.teacher_id=? AND p.last_seen>=? ORDER BY u.role,u.name",[$studentId,$editorTeacherId,time()-45])->fetchAll();
             reply(['presence'=>$presence]);
         }
         if($action==='editor_sync'){
             $fileId=idValue($data,'file_id');$known=max(0,(int)($data['revision']??0));
-            $record=run($db,'SELECT * FROM classwork_files WHERE id=? AND student_id=? AND deleted=0',[$fileId,$studentId])->fetch();if(!$record)fail('Файл не найден.',404);
+            $record=run($db,'SELECT * FROM classwork_files WHERE id=? AND student_id=? AND teacher_id=? AND deleted=0',[$fileId,$studentId,$editorTeacherId])->fetch();if(!$record)fail('Файл не найден.',404);
             $cursorStart=max(0,min(200000,(int)($data['cursor_start']??0)));$cursorEnd=max(0,min(200000,(int)($data['cursor_end']??$cursorStart)));
-            run($db,'INSERT INTO editor_presence(student_id,user_id,file_id,cursor_start,cursor_end,last_seen) VALUES(?,?,?,?,?,?) ON CONFLICT(student_id,user_id) DO UPDATE SET file_id=excluded.file_id,cursor_start=excluded.cursor_start,cursor_end=excluded.cursor_end,last_seen=excluded.last_seen',[$studentId,$user['id'],$fileId,$cursorStart,$cursorEnd,time()]);
+            run($db,'INSERT INTO editor_presence_context(student_id,teacher_id,user_id,file_id,cursor_start,cursor_end,last_seen) VALUES(?,?,?,?,?,?,?) ON CONFLICT(student_id,teacher_id,user_id) DO UPDATE SET file_id=excluded.file_id,cursor_start=excluded.cursor_start,cursor_end=excluded.cursor_end,last_seen=excluded.last_seen',[$studentId,$editorTeacherId,$user['id'],$fileId,$cursorStart,$cursorEnd,time()]);
             if(array_key_exists('content',$data)){
                 $content=$data['content'];if(!is_string($content)||strlen($content)>190000||!preg_match('//u',$content))fail('Код должен быть текстом не больше 190 КБ.');$expected=(int)($data['expected_revision']??0);
-                $db->exec('BEGIN IMMEDIATE');try{$record=run($db,'SELECT * FROM classwork_files WHERE id=? AND student_id=? AND deleted=0',[$fileId,$studentId])->fetch();if(!$record){$db->exec('ROLLBACK');fail('Файл не найден.',404);}if((int)$record['revision']!==$expected){$path=$directory.'/'.$record['storage_name'];$remote=is_file($path)?file_get_contents($path):false;$db->exec('ROLLBACK');if($remote===false)fail('Файл отсутствует на сервере.',404);reply(['error'=>'Файл уже изменён другим участником.','content'=>$remote,'revision'=>(int)$record['revision']],409);}
+                $db->exec('BEGIN IMMEDIATE');try{$record=run($db,'SELECT * FROM classwork_files WHERE id=? AND student_id=? AND teacher_id=? AND deleted=0',[$fileId,$studentId,$editorTeacherId])->fetch();if(!$record){$db->exec('ROLLBACK');fail('Файл не найден.',404);}if((int)$record['revision']!==$expected){$path=$directory.'/'.$record['storage_name'];$remote=is_file($path)?file_get_contents($path):false;$db->exec('ROLLBACK');if($remote===false)fail('Файл отсутствует на сервере.',404);reply(['error'=>'Файл уже изменён другим участником.','content'=>$remote,'revision'=>(int)$record['revision']],409);}
                     $ext=strtolower(pathinfo($record['name'],PATHINFO_EXTENSION));if(!in_array($ext,$editable,true)){$db->exec('ROLLBACK');fail('Этот файл нельзя редактировать в браузере.',415);}$path=$directory.'/'.$record['storage_name'];$temp=tempnam($directory,'edit-');if($temp===false||file_put_contents($temp,$content,LOCK_EX)===false){if($temp)@unlink($temp);$db->exec('ROLLBACK');fail('Не удалось сохранить файл.',503);}chmod($temp,0600);if(!rename($temp,$path)){@unlink($temp);$db->exec('ROLLBACK');fail('Не удалось заменить файл.',503);}run($db,"UPDATE classwork_files SET uploader_id=?,size=?,revision=revision+1,updated_at=strftime('%Y-%m-%dT%H:%M:%SZ','now') WHERE id=?",[$user['id'],strlen($content),$fileId]);$db->exec('COMMIT');$known=$expected+1;
                 }catch(Throwable $error){if($db->inTransaction())$db->exec('ROLLBACK');throw $error;}
             }
-            run($db,'DELETE FROM editor_presence WHERE last_seen < ?',[time()-15]);
+            run($db,'DELETE FROM editor_presence_context WHERE last_seen < ?',[time()-15]);
             $latest=run($db,'SELECT revision,updated_at FROM classwork_files WHERE id=?',[$fileId])->fetch();$payload=['ok'=>true,'revision'=>(int)$latest['revision'],'updated_at'=>$latest['updated_at']];
             if((int)$latest['revision']>$known){$path=$directory.'/'.$record['storage_name'];$remote=is_file($path)?file_get_contents($path):false;if($remote===false)fail('Файл отсутствует на сервере.',404);$payload['content']=$remote;}
-            $payload['presence']=run($db,"SELECT p.user_id,p.file_id,p.cursor_start,p.cursor_end,p.last_seen,u.name,u.role FROM editor_presence p JOIN users u ON u.id=p.user_id WHERE p.student_id=? AND p.last_seen>=? ORDER BY u.role,u.name",[$studentId,time()-15])->fetchAll();
-            $activeRun=run($db,"SELECT r.student_id,r.file_id,r.run_id,r.runner_id,r.status,r.stdin,r.output,r.updated_at,u.name AS runner_name FROM editor_runs r JOIN users u ON u.id=r.runner_id WHERE r.student_id=?",[$studentId])->fetch()?:null;
+            $payload['presence']=run($db,"SELECT p.user_id,p.file_id,p.cursor_start,p.cursor_end,p.last_seen,u.name,u.role FROM editor_presence_context p JOIN users u ON u.id=p.user_id WHERE p.student_id=? AND p.teacher_id=? AND p.last_seen>=? ORDER BY u.role,u.name",[$studentId,$editorTeacherId,time()-15])->fetchAll();
+            $activeRun=run($db,"SELECT r.student_id,r.file_id,r.run_id,r.runner_id,r.status,r.stdin,r.output,r.updated_at,u.name AS runner_name FROM editor_runs_context r JOIN users u ON u.id=r.runner_id WHERE r.student_id=? AND r.teacher_id=?",[$studentId,$editorTeacherId])->fetch()?:null;
             if($activeRun){$activeRun['output_size']=strlen((string)$activeRun['output']);if(isset($data['known_run_id'],$data['known_run_status'],$data['known_run_output_size'])&&hash_equals((string)$activeRun['run_id'],(string)$data['known_run_id'])&&(string)$activeRun['status']===(string)$data['known_run_status']&&(int)$activeRun['output_size']===(int)$data['known_run_output_size'])unset($activeRun['output']);}
             $payload['run']=$activeRun;
-            $payload['assignment']=editorAssignment($db,$studentId);
+            $payload['assignment']=editorAssignment($db,$studentId,$editorTeacherId);
             reply($payload);
         }
         if($action==='editor_assignment_save'){
@@ -496,37 +524,37 @@ try {
             }else{
                 $title=textValue($data,'title',250,true);$prompt=textValue($data,'prompt',30000,true);$answer=textValue($data,'correct_answer',5000);$explanation=textValue($data,'explanation',15000);
             }
-            run($db,"INSERT INTO editor_assignments(student_id,teacher_id,bank_item_id,title,prompt,correct_answer,explanation) VALUES(?,?,?,?,?,?,?) ON CONFLICT(student_id) DO UPDATE SET teacher_id=excluded.teacher_id,bank_item_id=excluded.bank_item_id,title=excluded.title,prompt=excluded.prompt,correct_answer=excluded.correct_answer,explanation=excluded.explanation,updated_at=strftime('%Y-%m-%dT%H:%M:%SZ','now')",[$studentId,$user['id'],$bankItemId,$title,$prompt,$answer,$explanation]);
-            reply(['ok'=>true,'assignment'=>editorAssignment($db,$studentId)]);
+            run($db,"INSERT INTO editor_assignments_context(student_id,teacher_id,bank_item_id,title,prompt,correct_answer,explanation) VALUES(?,?,?,?,?,?,?) ON CONFLICT(student_id,teacher_id) DO UPDATE SET bank_item_id=excluded.bank_item_id,title=excluded.title,prompt=excluded.prompt,correct_answer=excluded.correct_answer,explanation=excluded.explanation,updated_at=strftime('%Y-%m-%dT%H:%M:%SZ','now')",[$studentId,$user['id'],$bankItemId,$title,$prompt,$answer,$explanation]);
+            reply(['ok'=>true,'assignment'=>editorAssignment($db,$studentId,$editorTeacherId)]);
         }
         if($action==='editor_assignment_delete'){
-            requireAdmin($user);run($db,'DELETE FROM editor_assignments WHERE student_id=? AND teacher_id=?',[$studentId,$user['id']]);reply(['ok'=>true]);
+            requireAdmin($user);run($db,'DELETE FROM editor_assignments_context WHERE student_id=? AND teacher_id=?',[$studentId,$user['id']]);reply(['ok'=>true]);
         }
         if($action==='editor_run_start'){
-            $fileId=idValue($data,'file_id');$record=run($db,'SELECT id,name FROM classwork_files WHERE id=? AND student_id=? AND deleted=0',[$fileId,$studentId])->fetch();if(!$record||strtolower(pathinfo($record['name'],PATHINFO_EXTENSION))!=='py')fail('Выберите Python-файл.',400);
+            $fileId=idValue($data,'file_id');$record=run($db,'SELECT id,name FROM classwork_files WHERE id=? AND student_id=? AND teacher_id=? AND deleted=0',[$fileId,$studentId,$editorTeacherId])->fetch();if(!$record||strtolower(pathinfo($record['name'],PATHINFO_EXTENSION))!=='py')fail('Выберите Python-файл.',400);
             $stdin='';$runId=bin2hex(random_bytes(16));
-            run($db,"INSERT INTO editor_runs(student_id,file_id,run_id,runner_id,status,stdin,output,updated_at) VALUES(?,?,?,?,'running',?,'',?) ON CONFLICT(student_id) DO UPDATE SET file_id=excluded.file_id,run_id=excluded.run_id,runner_id=excluded.runner_id,status='running',stdin=excluded.stdin,output='',updated_at=excluded.updated_at",[$studentId,$fileId,$runId,$user['id'],$stdin,time()]);
+            run($db,"INSERT INTO editor_runs_context(student_id,teacher_id,file_id,run_id,runner_id,status,stdin,output,updated_at) VALUES(?,?,?,?,?,'running',?,'',?) ON CONFLICT(student_id,teacher_id) DO UPDATE SET file_id=excluded.file_id,run_id=excluded.run_id,runner_id=excluded.runner_id,status='running',stdin=excluded.stdin,output='',updated_at=excluded.updated_at",[$studentId,$editorTeacherId,$fileId,$runId,$user['id'],$stdin,time()]);
             reply(['run_id'=>$runId,'file_id'=>$fileId,'runner_id'=>(int)$user['id'],'runner_name'=>$user['name'],'status'=>'running','stdin'=>$stdin,'output'=>'','output_size'=>0,'updated_at'=>time()]);
         }
         if($action==='editor_run_update'){
             $runId=$data['run_id']??'';$status=$data['status']??'running';$output=$data['output']??'';if(!is_string($runId)||!preg_match('/^[a-f0-9]{32}$/D',$runId)||!in_array($status,['running','done','error'],true)||!is_string($output)||strlen($output)>4000000)fail('Результат запуска слишком большой. Уменьшите объём вывода или сложность рисунка.',413);
-            $changed=run($db,'UPDATE editor_runs SET status=?,output=?,updated_at=? WHERE student_id=? AND run_id=? AND runner_id=?',[$status,$output,time(),$studentId,$runId,$user['id']])->rowCount();if(!$changed)fail('Этот запуск уже завершён или заменён.',409);reply(['ok'=>true]);
+            $changed=run($db,'UPDATE editor_runs_context SET status=?,output=?,updated_at=? WHERE student_id=? AND teacher_id=? AND run_id=? AND runner_id=?',[$status,$output,time(),$studentId,$editorTeacherId,$runId,$user['id']])->rowCount();if(!$changed)fail('Этот запуск уже завершён или заменён.',409);reply(['ok'=>true]);
         }
         if($action==='editor_run_stop'){
-            $runId=$data['run_id']??'';if(!is_string($runId)||!preg_match('/^[a-f0-9]{32}$/D',$runId))fail('Некорректный запуск.');run($db,"UPDATE editor_runs SET status='stopped',updated_at=? WHERE student_id=? AND run_id=? AND status='running'",[time(),$studentId,$runId]);reply(['ok'=>true]);
+            $runId=$data['run_id']??'';if(!is_string($runId)||!preg_match('/^[a-f0-9]{32}$/D',$runId))fail('Некорректный запуск.');run($db,"UPDATE editor_runs_context SET status='stopped',updated_at=? WHERE student_id=? AND teacher_id=? AND run_id=? AND status='running'",[time(),$studentId,$editorTeacherId,$runId]);reply(['ok'=>true]);
         }
         if($action==='editor_create'){
             $relative=textValue($data,'path',500,true);$relative=str_replace('\\','/',$relative);if(str_starts_with($relative,'/')||str_contains($relative,'//'))fail('Некорректный путь файла.');foreach(explode('/',$relative) as $segment)if($segment===''||$segment==='.'||$segment==='..'||preg_match('/[\x00-\x1F\x7F]/',$segment))fail('Некорректный путь файла.');
             $name=basename($relative);$ext=strtolower(pathinfo($name,PATHINFO_EXTENSION));if(!in_array($ext,$editable,true))fail('Создай текстовый файл, например main.py или notes.txt.');
-            if(run($db,'SELECT id FROM classwork_files WHERE student_id=? AND relative_path=? AND deleted=0',[$studentId,$relative])->fetch())fail('Файл с таким именем уже существует.',409);
-            if((int)run($db,'SELECT COUNT(*) FROM classwork_files WHERE student_id=? AND deleted=0',[$studentId])->fetchColumn()>=200)fail('В папке ученика может быть не больше 200 файлов.');
+            if(run($db,'SELECT id FROM classwork_files WHERE student_id=? AND teacher_id=? AND relative_path=? AND deleted=0',[$studentId,$editorTeacherId,$relative])->fetch())fail('Файл с таким именем уже существует.',409);
+            if((int)run($db,'SELECT COUNT(*) FROM classwork_files WHERE student_id=? AND teacher_id=? AND deleted=0',[$studentId,$editorTeacherId])->fetchColumn()>=200)fail('В папке ученика может быть не больше 200 файлов.');
             if(!is_dir($directory)&&!mkdir($directory,0700,true))fail('Не удалось создать папку для файлов.',503);$storage=bin2hex(random_bytes(24)).'.bin';$path=$directory.'/'.$storage;if(file_put_contents($path,'',LOCK_EX)===false)fail('Не удалось создать файл.',503);chmod($path,0600);
-            try{run($db,"INSERT INTO classwork_files(student_id,uploader_id,name,relative_path,storage_name,size,revision,updated_at) VALUES(?,?,?,?,?,0,1,strftime('%Y-%m-%dT%H:%M:%SZ','now'))",[$studentId,$user['id'],$name,$relative,$storage]);$id=(int)$db->lastInsertId();}catch(Throwable $error){@unlink($path);throw $error;}
+            try{run($db,"INSERT INTO classwork_files(student_id,teacher_id,uploader_id,name,relative_path,storage_name,size,revision,updated_at) VALUES(?,?,?,?,?,?,0,1,strftime('%Y-%m-%dT%H:%M:%SZ','now'))",[$studentId,$editorTeacherId,$user['id'],$name,$relative,$storage]);$id=(int)$db->lastInsertId();}catch(Throwable $error){@unlink($path);throw $error;}
             reply(['id'=>$id,'name'=>$name,'path'=>$relative,'size'=>0,'revision'=>1],201);
         }
         if($action==='editor_save'){
             $id=idValue($data,'id');$content=$data['content']??null;if(!is_string($content)||strlen($content)>200000||!preg_match('//u',$content))fail('Код должен быть текстом не больше 200 КБ.');$expected=filter_var($data['revision']??null,FILTER_VALIDATE_INT);if($expected===false||$expected<1)fail('Некорректная версия файла.');
-            $db->exec('BEGIN IMMEDIATE');try{$record=run($db,'SELECT * FROM classwork_files WHERE id=? AND student_id=? AND deleted=0',[$id,$studentId])->fetch();if(!$record){$db->exec('ROLLBACK');fail('Файл не найден.',404);}if((int)$record['revision']!==(int)$expected){$path=$directory.'/'.$record['storage_name'];$current=is_file($path)?file_get_contents($path):false;$db->exec('ROLLBACK');if($current===false)fail('Файл отсутствует на сервере.',404);reply(['error'=>'Файл уже изменён другим участником.','content'=>$current,'revision'=>(int)$record['revision'],'updated_at'=>$record['updated_at']],409);}
+            $db->exec('BEGIN IMMEDIATE');try{$record=run($db,'SELECT * FROM classwork_files WHERE id=? AND student_id=? AND teacher_id=? AND deleted=0',[$id,$studentId,$editorTeacherId])->fetch();if(!$record){$db->exec('ROLLBACK');fail('Файл не найден.',404);}if((int)$record['revision']!==(int)$expected){$path=$directory.'/'.$record['storage_name'];$current=is_file($path)?file_get_contents($path):false;$db->exec('ROLLBACK');if($current===false)fail('Файл отсутствует на сервере.',404);reply(['error'=>'Файл уже изменён другим участником.','content'=>$current,'revision'=>(int)$record['revision'],'updated_at'=>$record['updated_at']],409);}
                 $ext=strtolower(pathinfo($record['name'],PATHINFO_EXTENSION));if(!in_array($ext,$editable,true)){$db->exec('ROLLBACK');fail('Этот файл нельзя редактировать в браузере.',415);}if(!is_dir($directory)){$db->exec('ROLLBACK');fail('Папка файлов недоступна.',503);}$path=$directory.'/'.$record['storage_name'];$temp=tempnam($directory,'edit-');if($temp===false||file_put_contents($temp,$content,LOCK_EX)===false){if($temp)@unlink($temp);$db->exec('ROLLBACK');fail('Не удалось сохранить файл.',503);}chmod($temp,0600);if(!rename($temp,$path)){@unlink($temp);$db->exec('ROLLBACK');fail('Не удалось заменить файл.',503);}run($db,"UPDATE classwork_files SET uploader_id=?,size=?,revision=revision+1,updated_at=strftime('%Y-%m-%dT%H:%M:%SZ','now') WHERE id=?",[$user['id'],strlen($content),$id]);$revision=(int)$expected+1;$db->exec('COMMIT');
             }catch(Throwable $error){if($db->inTransaction())$db->exec('ROLLBACK');throw $error;}
             reply(['ok'=>true,'revision'=>$revision,'size'=>strlen($content),'updated_at'=>gmdate('Y-m-d\TH:i:s\Z')]);
@@ -536,20 +564,21 @@ try {
     if (str_starts_with($action,'classwork_')) {
         $previewable=['','txt','csv','md','py','js','ts','jsx','tsx','html','css','json','xml','yaml','yml','sql','java','c','cpp','h','hpp','cs','go','rs','php','sh','ini','toml'];
         $allowed=array_merge($previewable,['xlsx','xls','ods']);
+        $classworkTeacherId=activeTeacherId($db,$user);
         if($action==='classwork_state'){
             if($user['role']==='admin'){
-                $students=run($db,"SELECT id,name,login,active FROM users WHERE role='student' AND teacher_id=? AND deleted_at IS NULL ORDER BY active DESC,name",[$user['id']])->fetchAll();
+                $students=run($db,"SELECT u.id,u.name,u.login,u.active FROM users u JOIN student_teachers st ON st.student_id=u.id WHERE u.role='student' AND st.teacher_id=? AND u.deleted_at IS NULL ORDER BY u.active DESC,u.name",[$user['id']])->fetchAll();
                 $studentId=isset($_GET['student_id'])&&$_GET['student_id']!==''?idValue($_GET,'student_id'):(int)($students[0]['id']??0);
                 if($studentId)requireOwnedStudent($db,$user,$studentId);
             }else{$students=[];$studentId=(int)$user['id'];}
-            $files=$studentId?run($db,'SELECT id,student_id,name,relative_path,size,revision,updated_at,created_at FROM classwork_files WHERE student_id=? AND deleted=0 ORDER BY relative_path',[$studentId])->fetchAll():[];
+            $files=$studentId?run($db,'SELECT id,student_id,name,relative_path,size,revision,updated_at,created_at FROM classwork_files WHERE student_id=? AND teacher_id=? AND deleted=0 ORDER BY relative_path',[$studentId,$classworkTeacherId])->fetchAll():[];
             reply(['user'=>publicUser($user),'students'=>$students,'student_id'=>$studentId,'files'=>$files]);
         }
         $fileRecord=null;
         if(in_array($action,['classwork_download','classwork_preview','classwork_remove'],true)){
             $source=in_array($action,['classwork_download','classwork_preview'],true)?$_GET:$data;
-            $fileRecord=run($db,'SELECT * FROM classwork_files WHERE id=? AND deleted=0',[idValue($source,'id')])->fetch();
-            if(!$fileRecord||($user['role']==='admin'&&!run($db,"SELECT id FROM users WHERE id=? AND role='student' AND teacher_id=? AND deleted_at IS NULL",[$fileRecord['student_id'],$user['id']])->fetch())||($user['role']!=='admin'&&(int)$fileRecord['student_id']!==(int)$user['id']))fail('Файл не найден.',404);
+            $fileRecord=run($db,'SELECT * FROM classwork_files WHERE id=? AND teacher_id=? AND deleted=0',[idValue($source,'id'),$classworkTeacherId])->fetch();
+            if(!$fileRecord||($user['role']==='admin'&&!run($db,"SELECT u.id FROM users u JOIN student_teachers st ON st.student_id=u.id WHERE u.id=? AND u.role='student' AND st.teacher_id=? AND u.deleted_at IS NULL",[$fileRecord['student_id'],$user['id']])->fetch())||($user['role']!=='admin'&&(int)$fileRecord['student_id']!==(int)$user['id']))fail('Файл не найден.',404);
         }
         $directory=$private.'/classwork_uploads';
         if($action==='classwork_download'){
@@ -568,7 +597,7 @@ try {
         if($action==='classwork_sync'){
             $paths=$data['paths']??null;if(!is_array($paths)||count($paths)>200)fail('Некорректный список файлов.');$clean=[];
             foreach($paths as $relative){if(!is_string($relative)||strlen($relative)>500)fail('Некорректный путь файла.');$relative=str_replace('\\','/',$relative);if($relative===''||str_starts_with($relative,'/')||str_contains($relative,'//'))fail('Некорректный путь файла.');foreach(explode('/',$relative) as $segment)if($segment===''||$segment==='.'||$segment==='..')fail('Некорректный путь файла.');$clean[]=$relative;}
-            if($clean){$marks=implode(',',array_fill(0,count($clean),'?'));run($db,"UPDATE classwork_files SET deleted=1 WHERE student_id=? AND deleted=0 AND relative_path NOT IN ($marks)",array_merge([$studentId],$clean));}else run($db,'UPDATE classwork_files SET deleted=1 WHERE student_id=? AND deleted=0',[$studentId]);
+            if($clean){$marks=implode(',',array_fill(0,count($clean),'?'));run($db,"UPDATE classwork_files SET deleted=1 WHERE student_id=? AND teacher_id=? AND deleted=0 AND relative_path NOT IN ($marks)",array_merge([$studentId,$classworkTeacherId],$clean));}else run($db,'UPDATE classwork_files SET deleted=1 WHERE student_id=? AND teacher_id=? AND deleted=0',[$studentId,$classworkTeacherId]);
             reply(['ok'=>true,'count'=>count($clean)]);
         }
         if($action==='classwork_upload'){
@@ -576,7 +605,7 @@ try {
             $name=basename(str_replace('\\','/',(string)$file['name']));if($name===''||strlen($name)>240||preg_match('/[\x00-\x1F\x7F]/',$name)||!preg_match('//u',$name))fail('Некорректное имя файла.');$ext=strtolower(pathinfo($name,PATHINFO_EXTENSION));if(!in_array($ext,$allowed,true))fail('Этот тип файла не поддерживается.');
             $relative=textValue($data,'path',500,true);$relative=str_replace('\\','/',$relative);if(str_starts_with($relative,'/')||str_contains($relative,'//')||basename($relative)!==$name)fail('Некорректный путь файла.');foreach(explode('/',$relative) as $segment)if($segment===''||$segment==='.'||$segment==='..')fail('Некорректный путь файла.');
             $size=filesize($file['tmp_name']);if($size===false||$size>10*1024*1024)fail('Максимальный размер файла — 10 МБ.',413);if(!is_dir($directory)&&!mkdir($directory,0700,true))fail('Не удалось создать папку для файлов.',503);$storage=bin2hex(random_bytes(24)).'.bin';$path=$directory.'/'.$storage;
-            $db->exec('BEGIN IMMEDIATE');try{run($db,'UPDATE classwork_files SET deleted=1 WHERE student_id=? AND relative_path=? AND deleted=0',[$studentId,$relative]);if((int)run($db,'SELECT COUNT(*) FROM classwork_files WHERE student_id=? AND deleted=0',[$studentId])->fetchColumn()>=200){$db->exec('ROLLBACK');fail('В папке ученика может быть не больше 200 файлов.');}if(!move_uploaded_file($file['tmp_name'],$path))throw new RuntimeException('Cannot move uploaded file');chmod($path,0600);run($db,'INSERT INTO classwork_files(student_id,uploader_id,name,relative_path,storage_name,size) VALUES(?,?,?,?,?,?)',[$studentId,$user['id'],$name,$relative,$storage,$size]);$id=(int)$db->lastInsertId();$db->exec('COMMIT');}catch(Throwable $error){$db->exec('ROLLBACK');if(is_file($path))unlink($path);throw $error;}
+            $db->exec('BEGIN IMMEDIATE');try{run($db,'UPDATE classwork_files SET deleted=1 WHERE student_id=? AND teacher_id=? AND relative_path=? AND deleted=0',[$studentId,$classworkTeacherId,$relative]);if((int)run($db,'SELECT COUNT(*) FROM classwork_files WHERE student_id=? AND teacher_id=? AND deleted=0',[$studentId,$classworkTeacherId])->fetchColumn()>=200){$db->exec('ROLLBACK');fail('В папке ученика может быть не больше 200 файлов.');}if(!move_uploaded_file($file['tmp_name'],$path))throw new RuntimeException('Cannot move uploaded file');chmod($path,0600);run($db,'INSERT INTO classwork_files(student_id,teacher_id,uploader_id,name,relative_path,storage_name,size) VALUES(?,?,?,?,?,?,?)',[$studentId,$classworkTeacherId,$user['id'],$name,$relative,$storage,$size]);$id=(int)$db->lastInsertId();$db->exec('COMMIT');}catch(Throwable $error){$db->exec('ROLLBACK');if(is_file($path))unlink($path);throw $error;}
             reply(['id'=>$id,'name'=>$name,'path'=>$relative,'size'=>$size],201);
         }
         fail('Неизвестное действие.',404);
@@ -585,7 +614,7 @@ try {
         if ($user['role'] === 'admin') {
             $items = run($db,'SELECT id,title,subject,topic,exam_number,difficulty,prompt,correct_answer,explanation,default_score,created_at,updated_at FROM question_bank WHERE teacher_id=? AND deleted_at IS NULL ORDER BY updated_at DESC,id DESC',[$user['id']])->fetchAll();
         } else {
-            $items = run($db,"SELECT q.id,q.title,q.subject,q.topic,q.exam_number,q.difficulty,q.prompt,q.correct_answer,q.explanation,q.default_score,q.created_at,q.updated_at,u.name AS teacher_name FROM question_bank q JOIN users u ON u.id=q.teacher_id WHERE q.teacher_id=? AND q.deleted_at IS NULL AND u.active=1 AND u.deleted_at IS NULL ORDER BY q.updated_at DESC,q.id DESC",[$user['teacher_id']])->fetchAll();
+            $items = run($db,"SELECT q.id,q.title,q.subject,q.topic,q.exam_number,q.difficulty,q.prompt,q.correct_answer,q.explanation,q.default_score,q.created_at,q.updated_at,u.name AS teacher_name FROM question_bank q JOIN users u ON u.id=q.teacher_id WHERE q.teacher_id=? AND q.deleted_at IS NULL AND u.active=1 AND u.deleted_at IS NULL ORDER BY q.updated_at DESC,q.id DESC",[activeTeacherId($db,$user)])->fetchAll();
         }
         $itemIds=array_map(static fn($item)=>(int)$item['id'],$items);$byItem=[];
         if($itemIds){$marks=implode(',',array_fill(0,count($itemIds),'?'));$files=run($db,"SELECT id,bank_item_id,name,size,mime,created_at FROM question_bank_files WHERE deleted=0 AND bank_item_id IN ($marks) ORDER BY id",$itemIds)->fetchAll();foreach($files as $file)$byItem[$file['bank_item_id']][]=$file;}
@@ -597,7 +626,7 @@ try {
         if(in_array($action,['bank_file_download','bank_file_view'],true)){
             $fileId=idValue($source,'id');$record=run($db,'SELECT f.*,q.teacher_id,q.deleted_at AS bank_deleted,u.active AS teacher_active,u.deleted_at AS teacher_deleted FROM question_bank_files f JOIN question_bank q ON q.id=f.bank_item_id JOIN users u ON u.id=q.teacher_id WHERE f.id=? AND f.deleted=0',[$fileId])->fetch();
             if(!$record)fail('Файл не найден.',404);
-            if($user['role']==='admin'){$visible=(int)$record['teacher_id']===(int)$user['id'];}else{$visible=((int)$record['teacher_id']===(int)$user['teacher_id']&&$record['bank_deleted']===null&&(int)$record['teacher_active']&&$record['teacher_deleted']===null)||(bool)run($db,'SELECT 1 FROM homework_questions q JOIN homeworks h ON h.id=q.homework_id WHERE q.bank_item_id=? AND h.student_id=? AND h.deleted_at IS NULL LIMIT 1',[$record['bank_item_id'],$user['id']])->fetchColumn()||(bool)run($db,'SELECT 1 FROM editor_assignments WHERE bank_item_id=? AND student_id=? LIMIT 1',[$record['bank_item_id'],$user['id']])->fetchColumn();}
+            if($user['role']==='admin'){$visible=(int)$record['teacher_id']===(int)$user['id'];}else{$visible=((int)$record['teacher_id']===activeTeacherId($db,$user)&&$record['bank_deleted']===null&&(int)$record['teacher_active']&&$record['teacher_deleted']===null)||(bool)run($db,'SELECT 1 FROM homework_questions q JOIN homeworks h ON h.id=q.homework_id WHERE q.bank_item_id=? AND h.student_id=? AND h.deleted_at IS NULL LIMIT 1',[$record['bank_item_id'],$user['id']])->fetchColumn()||(bool)run($db,'SELECT 1 FROM editor_assignments_context WHERE bank_item_id=? AND student_id=? LIMIT 1',[$record['bank_item_id'],$user['id']])->fetchColumn();}
             if(!$visible)fail('Файл не найден.',404);
             $path=$private.'/bank_uploads/'.$record['storage_name'];if(!is_file($path))fail('Файл отсутствует на сервере.',404);
             if($action==='bank_file_view'){
@@ -641,7 +670,7 @@ try {
         $title=textValue($data,'title',250,true);$subject=textValue($data,'subject',100,true);$description=textValue($data,'description',10000);$due=validDate(textValue($data,'due_date',10));
         $rawStudents=$data['student_ids']??null;if(!is_array($rawStudents)||!$rawStudents||count($rawStudents)>200)fail('Выберите от 1 до 200 учеников.');
         $studentIds=[];foreach($rawStudents as $raw){$id=filter_var($raw,FILTER_VALIDATE_INT);if($id===false||$id<1)fail('Некорректный ученик.');$studentIds[]=(int)$id;}$studentIds=array_values(array_unique($studentIds));
-        $marks=implode(',',array_fill(0,count($studentIds),'?'));$found=run($db,"SELECT id FROM users WHERE id IN ($marks) AND role='student' AND teacher_id=? AND active=1 AND deleted_at IS NULL",array_merge($studentIds,[$user['id']]))->fetchAll();if(count($found)!==count($studentIds))fail('Один из учеников не найден или его доступ приостановлен.',404);
+        $marks=implode(',',array_fill(0,count($studentIds),'?'));$found=run($db,"SELECT u.id FROM users u JOIN student_teachers st ON st.student_id=u.id WHERE u.id IN ($marks) AND u.role='student' AND st.teacher_id=? AND u.active=1 AND u.deleted_at IS NULL",array_merge($studentIds,[$user['id']]))->fetchAll();if(count($found)!==count($studentIds))fail('Один из учеников не найден или его доступ приостановлен.',404);
         $rawQuestions=$data['questions']??null;if(!is_array($rawQuestions)||!$rawQuestions||count($rawQuestions)>30)fail('В домашней работе должно быть от 1 до 30 заданий.');
         $questions=[];$total=0;$seenBankItems=[];
         foreach($rawQuestions as $index=>$raw){
@@ -658,7 +687,7 @@ try {
     }
     if ($action === 'homework_detail') {
         $id=idValue($_GET,'id');
-        $homework=$user['role']==='admin'?run($db,'SELECT h.*,u.name AS student_name FROM homeworks h JOIN users u ON u.id=h.student_id WHERE h.id=? AND h.created_by=? AND u.teacher_id=? AND h.deleted_at IS NULL',[$id,$user['id'],$user['id']])->fetch():run($db,'SELECT h.*,u.name AS student_name FROM homeworks h JOIN users u ON u.id=h.student_id WHERE h.id=? AND h.student_id=? AND h.deleted_at IS NULL',[$id,$user['id']])->fetch();
+        $homework=$user['role']==='admin'?run($db,'SELECT h.*,u.name AS student_name FROM homeworks h JOIN users u ON u.id=h.student_id WHERE h.id=? AND h.created_by=? AND h.deleted_at IS NULL',[$id,$user['id']])->fetch():run($db,'SELECT h.*,u.name AS student_name FROM homeworks h JOIN users u ON u.id=h.student_id WHERE h.id=? AND h.student_id=? AND h.created_by=? AND h.deleted_at IS NULL',[$id,$user['id'],activeTeacherId($db,$user)])->fetch();
         if(!$homework)fail('Домашняя работа не найдена.',404);
         $questions=run($db,'SELECT * FROM homework_questions WHERE homework_id=? ORDER BY position',[$id])->fetchAll();
         $files=run($db,'SELECT f.id,f.question_id,f.name,f.size,f.created_at FROM homework_files f JOIN homework_questions q ON q.id=f.question_id WHERE q.homework_id=? AND f.deleted=0 ORDER BY f.id',[$id])->fetchAll();$byQuestion=[];foreach($files as $file)$byQuestion[$file['question_id']][]=$file;
@@ -667,7 +696,7 @@ try {
         foreach($questions as &$question){$question['files']=$byQuestion[$question['id']]??[];$question['materials']=$materialsByBank[$question['bank_item_id']]??[];if($user['role']!=='admin'&&$homework['status']==='assigned'){unset($question['correct_answer'],$question['explanation']);}}unset($question);
         $students=[];$assignmentStudentIds=[];
         if($user['role']==='admin'){
-            $students=run($db,"SELECT id,name,active FROM users WHERE role='student' AND teacher_id=? AND deleted_at IS NULL ORDER BY name COLLATE NOCASE",[$user['id']])->fetchAll();
+            $students=run($db,"SELECT u.id,u.name,u.active FROM users u JOIN student_teachers st ON st.student_id=u.id WHERE u.role='student' AND st.teacher_id=? AND u.deleted_at IS NULL ORDER BY u.name COLLATE NOCASE",[$user['id']])->fetchAll();
             $assignmentRows=!empty($homework['group_id'])?run($db,'SELECT student_id FROM homeworks WHERE group_id=? AND created_by=? AND deleted_at IS NULL ORDER BY id',[$homework['group_id'],$user['id']])->fetchAll():[['student_id'=>$homework['student_id']]];
             $assignmentStudentIds=array_map(static fn($row)=>(int)$row['student_id'],$assignmentRows);
         }
@@ -695,7 +724,7 @@ try {
         $studentIds=[];foreach($rawStudents as $raw){$studentId=filter_var($raw,FILTER_VALIDATE_INT);if($studentId===false||$studentId<1)fail('Некорректный ученик.');$studentIds[]=(int)$studentId;}$studentIds=array_values(array_unique($studentIds));
         $current=!empty($source['group_id'])?run($db,'SELECT h.*,u.name AS student_name FROM homeworks h JOIN users u ON u.id=h.student_id WHERE h.group_id=? AND h.created_by=? AND h.deleted_at IS NULL ORDER BY h.id',[$source['group_id'],$user['id']])->fetchAll():[array_merge($source,['student_name'=>(string)run($db,'SELECT name FROM users WHERE id=?',[$source['student_id']])->fetchColumn()])];
         $currentByStudent=[];foreach($current as $item)$currentByStudent[(int)$item['student_id']]=$item;
-        $marks=implode(',',array_fill(0,count($studentIds),'?'));$found=run($db,"SELECT id,active FROM users WHERE id IN ($marks) AND role='student' AND teacher_id=? AND deleted_at IS NULL",array_merge($studentIds,[$user['id']]))->fetchAll();if(count($found)!==count($studentIds))fail('Один из учеников не найден.',404);
+        $marks=implode(',',array_fill(0,count($studentIds),'?'));$found=run($db,"SELECT u.id,u.active FROM users u JOIN student_teachers st ON st.student_id=u.id WHERE u.id IN ($marks) AND u.role='student' AND st.teacher_id=? AND u.deleted_at IS NULL",array_merge($studentIds,[$user['id']]))->fetchAll();if(count($found)!==count($studentIds))fail('Один из учеников не найден.',404);
         foreach($found as $student){$studentId=(int)$student['id'];if(!(int)$student['active']&&!isset($currentByStudent[$studentId]))fail('Нельзя назначить работу ученику с приостановленным доступом.',409);}
         $selected=array_fill_keys($studentIds,true);$blocked=[];
         foreach($current as $item){$studentId=(int)$item['student_id'];if(isset($selected[$studentId]))continue;$progress=(int)run($db,"SELECT COUNT(*) FROM homework_questions q WHERE q.homework_id=? AND (trim(q.answer_text)<>'' OR trim(q.code_text)<>'' OR EXISTS(SELECT 1 FROM homework_files f WHERE f.question_id=q.id AND f.deleted=0))",[$item['id']])->fetchColumn();if($item['status']!=='assigned'||$progress>0)$blocked[]=$item['student_name'];}
@@ -711,12 +740,12 @@ try {
     }
     if ($action === 'homework_save_progress') {
         if($user['role']!=='student')fail('Ответы сохраняет ученик.',403);$id=idValue($data,'id');
-        $homework=run($db,"SELECT * FROM homeworks WHERE id=? AND student_id=? AND deleted_at IS NULL",[$id,$user['id']])->fetch();if(!$homework)fail('Домашняя работа не найдена.',404);if(!in_array($homework['status'],['assigned','revision'],true))fail('Работа уже отправлена.',409);
+        $homework=run($db,"SELECT * FROM homeworks WHERE id=? AND student_id=? AND created_by=? AND deleted_at IS NULL",[$id,$user['id'],activeTeacherId($db,$user)])->fetch();if(!$homework)fail('Домашняя работа не найдена.',404);if(!in_array($homework['status'],['assigned','revision'],true))fail('Работа уже отправлена.',409);
         $answers=$data['answers']??null;if(!is_array($answers)||count($answers)>30)fail('Некорректные ответы.');$db->exec('BEGIN IMMEDIATE');
         try{foreach($answers as $answer){if(!is_array($answer))fail('Некорректный ответ.');$questionId=filter_var($answer['id']??null,FILTER_VALIDATE_INT);if($questionId===false)fail('Некорректное задание.');$text=textValue($answer,'answer_text',10000);$code=textValue($answer,'code_text',30000);$changed=run($db,'UPDATE homework_questions SET answer_text=?,code_text=?,auto_correct=NULL WHERE id=? AND homework_id=?',[$text,$code,$questionId,$id]);if(!$changed->rowCount())fail('Задание не найдено.',404);}run($db,"UPDATE homeworks SET updated_at=strftime('%Y-%m-%dT%H:%M:%SZ','now') WHERE id=?",[$id]);$db->exec('COMMIT');}catch(Throwable $error){$db->exec('ROLLBACK');throw $error;}reply(['ok'=>true]);
     }
     if ($action === 'homework_submit') {
-        if($user['role']!=='student')fail('Работу отправляет ученик.',403);$id=idValue($data,'id');$homework=run($db,'SELECT * FROM homeworks WHERE id=? AND student_id=? AND deleted_at IS NULL',[$id,$user['id']])->fetch();if(!$homework)fail('Домашняя работа не найдена.',404);if(!in_array($homework['status'],['assigned','revision'],true))fail('Работа уже отправлена.',409);
+        if($user['role']!=='student')fail('Работу отправляет ученик.',403);$id=idValue($data,'id');$homework=run($db,'SELECT * FROM homeworks WHERE id=? AND student_id=? AND created_by=? AND deleted_at IS NULL',[$id,$user['id'],activeTeacherId($db,$user)])->fetch();if(!$homework)fail('Домашняя работа не найдена.',404);if(!in_array($homework['status'],['assigned','revision'],true))fail('Работа уже отправлена.',409);
         $questions=run($db,'SELECT * FROM homework_questions WHERE homework_id=?',[$id])->fetchAll();$responded=0;$db->exec('BEGIN IMMEDIATE');try{foreach($questions as $q){$hasFile=(int)run($db,'SELECT COUNT(*) FROM homework_files WHERE question_id=? AND deleted=0',[$q['id']])->fetchColumn()>0;if(trim($q['answer_text'])!==''||trim($q['code_text'])!==''||$hasFile)$responded++;$auto=trim($q['answer_text'])===''?null:(normalizedAnswer($q['answer_text'])===normalizedAnswer($q['correct_answer'])?1:0);run($db,"UPDATE homework_questions SET auto_correct=?,awarded_score=NULL,teacher_feedback='' WHERE id=?",[$auto,$q['id']]);}if(!$responded){$db->exec('ROLLBACK');fail('Добавьте хотя бы один ответ, код или файл.');}run($db,"UPDATE homeworks SET status='submitted',submitted_at=strftime('%Y-%m-%dT%H:%M:%SZ','now'),completed_at=NULL,score=NULL,feedback='',updated_at=strftime('%Y-%m-%dT%H:%M:%SZ','now') WHERE id=?",[$id]);$db->exec('COMMIT');}catch(Throwable $error){if($db->inTransaction())$db->exec('ROLLBACK');throw $error;}reply(['ok'=>true,'answered'=>$responded,'total'=>count($questions)]);
     }
     if ($action === 'homework_review') {
@@ -737,25 +766,36 @@ try {
         clearRemember($db,$rememberCookie,$secure);
         $_SESSION=[]; session_destroy(); setcookie(session_name(),'', ['expires'=>time()-3600,'path'=>'/','secure'=>$secure,'httponly'=>true,'samesite'=>'Lax']); reply(['ok'=>true]);
     }
+    if ($action === 'student_context') {
+        if($user['role']!=='student')fail('Переключение предмета доступно ученику.',403);
+        $teacherId=idValue($data,'teacher_id');
+        $context=run($db,'SELECT 1 FROM student_teachers st JOIN users u ON u.id=st.teacher_id WHERE st.student_id=? AND st.teacher_id=? AND u.active=1 AND u.deleted_at IS NULL',[$user['id'],$teacherId])->fetchColumn();
+        if(!$context)fail('Этот предмет недоступен.',404);
+        $_SESSION['teacher_context_id']=$teacherId;
+        reply(['ok'=>true]);
+    }
     if ($action === 'state') {
+        $contexts=$user['role']==='student'?studentContexts($db,$user):[];
+        $activeTeacherId=activeTeacherId($db,$user);
         if ($user['role'] === 'admin') {
             $canManageTeachers = (int)$user['id'] === (int)$db->query("SELECT MIN(id) FROM users WHERE role='admin' AND deleted_at IS NULL")->fetchColumn();
             $teachers = $canManageTeachers ? $db->query("SELECT id,name,login,role,active,created_at FROM users WHERE role='admin' AND deleted_at IS NULL ORDER BY name,id")->fetchAll() : [];
-            $students = run($db,"SELECT id,name,login,role,active,created_at FROM users WHERE role='student' AND teacher_id=? AND deleted_at IS NULL ORDER BY active DESC,name",[$user['id']])->fetchAll();
-            $tasks = run($db,'SELECT tasks.*,users.name AS student_name FROM tasks JOIN users ON tasks.student_id=users.id WHERE users.teacher_id=? AND tasks.deleted_at IS NULL AND users.deleted_at IS NULL ORDER BY tasks.updated_at DESC,tasks.id DESC',[$user['id']])->fetchAll();
-            $homeworks = run($db,"SELECT h.*,u.name AS student_name,(SELECT COUNT(*) FROM homework_questions q WHERE q.homework_id=h.id) AS question_count,(SELECT COUNT(*) FROM homework_questions q WHERE q.homework_id=h.id AND (trim(q.answer_text)<>'' OR trim(q.code_text)<>'' OR EXISTS(SELECT 1 FROM homework_files f WHERE f.question_id=q.id AND f.deleted=0))) AS answered_count FROM homeworks h JOIN users u ON h.student_id=u.id WHERE h.created_by=? AND u.teacher_id=? AND h.deleted_at IS NULL AND u.deleted_at IS NULL ORDER BY h.updated_at DESC,h.id DESC",[$user['id'],$user['id']])->fetchAll();
+            $students = run($db,"SELECT u.id,u.name,u.login,u.role,u.active,u.created_at FROM users u JOIN student_teachers st ON st.student_id=u.id WHERE u.role='student' AND st.teacher_id=? AND u.deleted_at IS NULL ORDER BY u.active DESC,u.name",[$user['id']])->fetchAll();
+            $tasks = run($db,'SELECT tasks.*,users.name AS student_name FROM tasks JOIN users ON tasks.student_id=users.id WHERE tasks.teacher_id=? AND tasks.deleted_at IS NULL AND users.deleted_at IS NULL ORDER BY tasks.updated_at DESC,tasks.id DESC',[$user['id']])->fetchAll();
+            $homeworks = run($db,"SELECT h.*,u.name AS student_name,(SELECT COUNT(*) FROM homework_questions q WHERE q.homework_id=h.id) AS question_count,(SELECT COUNT(*) FROM homework_questions q WHERE q.homework_id=h.id AND (trim(q.answer_text)<>'' OR trim(q.code_text)<>'' OR EXISTS(SELECT 1 FROM homework_files f WHERE f.question_id=q.id AND f.deleted=0))) AS answered_count FROM homeworks h JOIN users u ON h.student_id=u.id WHERE h.created_by=? AND h.deleted_at IS NULL AND u.deleted_at IS NULL ORDER BY h.updated_at DESC,h.id DESC",[$user['id']])->fetchAll();
         } else {
-            $canManageTeachers = false; $teachers = []; $students = []; $tasks = run($db,'SELECT tasks.*,? AS student_name FROM tasks WHERE student_id=? AND deleted_at IS NULL ORDER BY updated_at DESC,id DESC',[$user['name'],$user['id']])->fetchAll();
-            $homeworks = run($db,"SELECT h.*,? AS student_name,(SELECT COUNT(*) FROM homework_questions q WHERE q.homework_id=h.id) AS question_count,(SELECT COUNT(*) FROM homework_questions q WHERE q.homework_id=h.id AND (trim(q.answer_text)<>'' OR trim(q.code_text)<>'' OR EXISTS(SELECT 1 FROM homework_files f WHERE f.question_id=q.id AND f.deleted=0))) AS answered_count FROM homeworks h WHERE h.student_id=? AND h.deleted_at IS NULL ORDER BY h.updated_at DESC,h.id DESC",[$user['name'],$user['id']])->fetchAll();
+            $canManageTeachers = false; $teachers = []; $students = []; $tasks = run($db,'SELECT tasks.*,? AS student_name FROM tasks WHERE student_id=? AND teacher_id=? AND deleted_at IS NULL ORDER BY updated_at DESC,id DESC',[$user['name'],$user['id'],$activeTeacherId])->fetchAll();
+            $homeworks = run($db,"SELECT h.*,? AS student_name,(SELECT COUNT(*) FROM homework_questions q WHERE q.homework_id=h.id) AS question_count,(SELECT COUNT(*) FROM homework_questions q WHERE q.homework_id=h.id AND (trim(q.answer_text)<>'' OR trim(q.code_text)<>'' OR EXISTS(SELECT 1 FROM homework_files f WHERE f.question_id=q.id AND f.deleted=0))) AS answered_count FROM homeworks h WHERE h.student_id=? AND h.created_by=? AND h.deleted_at IS NULL ORDER BY h.updated_at DESC,h.id DESC",[$user['name'],$user['id'],$activeTeacherId])->fetchAll();
         }
         $files = $user['role'] === 'admin'
-            ? run($db,'SELECT a.id,a.task_id,a.kind,a.name,a.relative_path,a.size,a.created_at FROM attachments a JOIN tasks t ON t.id=a.task_id JOIN users s ON s.id=t.student_id WHERE s.teacher_id=? AND a.deleted=0 AND t.deleted_at IS NULL ORDER BY a.id',[$user['id']])->fetchAll()
-            : run($db,'SELECT a.id,a.task_id,a.kind,a.name,a.relative_path,a.size,a.created_at FROM attachments a JOIN tasks t ON t.id=a.task_id WHERE a.deleted=0 AND t.deleted_at IS NULL AND t.student_id=? ORDER BY a.id',[$user['id']])->fetchAll();
+            ? run($db,'SELECT a.id,a.task_id,a.kind,a.name,a.relative_path,a.size,a.created_at FROM attachments a JOIN tasks t ON t.id=a.task_id WHERE t.teacher_id=? AND a.deleted=0 AND t.deleted_at IS NULL ORDER BY a.id',[$user['id']])->fetchAll()
+            : run($db,'SELECT a.id,a.task_id,a.kind,a.name,a.relative_path,a.size,a.created_at FROM attachments a JOIN tasks t ON t.id=a.task_id WHERE a.deleted=0 AND t.deleted_at IS NULL AND t.student_id=? AND t.teacher_id=? ORDER BY a.id',[$user['id'],$activeTeacherId])->fetchAll();
         $byTask=[]; foreach ($files as $file) $byTask[$file['task_id']][]=$file;
         foreach ($tasks as &$item) $item['attachments']=$byTask[$item['id']] ?? [];
         unset($item);
-        $meeting=$user['role']==='student'?run($db,"SELECT id,status,expires_at,created_at FROM meetings WHERE student_id=? AND status='active' AND expires_at>? ORDER BY id DESC LIMIT 1",[$user['id'],time()])->fetch()?:null:null;
-        reply(['user'=>publicUser($user),'can_manage_teachers'=>$canManageTeachers,'teachers'=>$teachers,'students'=>$students,'tasks'=>$tasks,'homeworks'=>$homeworks,'meeting'=>$meeting]);
+        $meeting=$user['role']==='student'?run($db,"SELECT id,status,expires_at,created_at FROM meetings WHERE student_id=? AND teacher_id=? AND status='active' AND expires_at>? ORDER BY id DESC LIMIT 1",[$user['id'],$activeTeacherId,time()])->fetch()?:null:null;
+        $relations=$canManageTeachers?run($db,'SELECT st.student_id,st.teacher_id,st.subject,u.name AS teacher_name FROM student_teachers st JOIN users u ON u.id=st.teacher_id ORDER BY st.student_id,u.name')->fetchAll():[];
+        reply(['user'=>publicUser($user),'can_manage_teachers'=>$canManageTeachers,'teachers'=>$teachers,'students'=>$students,'tasks'=>$tasks,'homeworks'=>$homeworks,'meeting'=>$meeting,'contexts'=>$contexts,'active_teacher_id'=>$activeTeacherId,'student_teachers'=>$relations]);
     }
     if ($action === 'change_password') {
         $old = textValue($data,'old_password',72,true);
@@ -772,8 +812,17 @@ try {
         if (!preg_match('/^[a-z0-9._-]{3,64}$/D',$login)) fail('Логин: 3–64 латинских буквы, цифры, точки, дефисы или подчёркивания.');
         if (run($db,'SELECT id FROM users WHERE login=?',[$login])->fetch()) fail('Этот логин уже занят.');
         $password = bin2hex(random_bytes(8));
-        run($db,"INSERT INTO users(name,login,password_hash,role,teacher_id) VALUES(?,?,?,'student',?)",[$name,$login,password_hash($password,PASSWORD_DEFAULT),$user['id']]);
-        reply(['id'=>(int)$db->lastInsertId(),'name'=>$name,'login'=>$login,'role'=>'student','password'=>$password],201);
+        $subject=textValue($data,'subject',100)?:'Информатика';
+        $db->exec('BEGIN IMMEDIATE');
+        try{run($db,"INSERT INTO users(name,login,password_hash,role,teacher_id) VALUES(?,?,?,'student',?)",[$name,$login,password_hash($password,PASSWORD_DEFAULT),$user['id']]);$studentId=(int)$db->lastInsertId();run($db,'INSERT INTO student_teachers(student_id,teacher_id,subject) VALUES(?,?,?)',[$studentId,$user['id'],$subject]);$db->exec('COMMIT');}catch(Throwable $error){if($db->inTransaction())$db->exec('ROLLBACK');throw $error;}
+        reply(['id'=>$studentId,'name'=>$name,'login'=>$login,'role'=>'student','password'=>$password],201);
+    }
+    if ($action === 'student_teacher_add') {
+        requireOwner($db,$user);$studentId=idValue($data,'student_id');$teacherId=idValue($data,'teacher_id');$subject=textValue($data,'subject',100,true);
+        if(!run($db,"SELECT 1 FROM users WHERE id=? AND role='student' AND deleted_at IS NULL",[$studentId])->fetchColumn())fail('Ученик не найден.',404);
+        if(!run($db,"SELECT 1 FROM users WHERE id=? AND role='admin' AND active=1 AND deleted_at IS NULL",[$teacherId])->fetchColumn())fail('Преподаватель не найден.',404);
+        run($db,"INSERT INTO student_teachers(student_id,teacher_id,subject) VALUES(?,?,?) ON CONFLICT(student_id,teacher_id) DO UPDATE SET subject=excluded.subject",[$studentId,$teacherId,$subject]);
+        reply(['ok'=>true]);
     }
     if ($action === 'create_teacher') {
         requireOwner($db,$user);
@@ -823,18 +872,18 @@ try {
     }
     if ($action === 'update_recipients') {
         requireAdmin($user); $id=idValue($data,'id');
-        $source=run($db,'SELECT t.* FROM tasks t JOIN users s ON s.id=t.student_id WHERE t.id=? AND s.teacher_id=? AND t.deleted_at IS NULL AND s.deleted_at IS NULL',[$id,$user['id']])->fetch();
+        $source=run($db,'SELECT t.* FROM tasks t JOIN users s ON s.id=t.student_id WHERE t.id=? AND t.teacher_id=? AND t.deleted_at IS NULL AND s.deleted_at IS NULL',[$id,$user['id']])->fetch();
         if (!$source) fail('Задание не найдено.',404);
         $rawIds=$data['student_ids'] ?? [];
         if (!is_array($rawIds)||!$rawIds||count($rawIds)>200) fail('Выберите от 1 до 200 учеников.');
         $studentIds=[]; foreach($rawIds as $rawId){$studentId=filter_var($rawId,FILTER_VALIDATE_INT);if($studentId===false||$studentId<1)fail('Некорректный ученик.');$studentIds[]=(int)$studentId;}
         $studentIds=array_values(array_unique($studentIds));
         $current=!empty($source['group_id'])
-            ? run($db,'SELECT t.* FROM tasks t JOIN users s ON s.id=t.student_id WHERE t.group_id=? AND s.teacher_id=? AND t.deleted_at IS NULL AND s.deleted_at IS NULL',[$source['group_id'],$user['id']])->fetchAll()
+            ? run($db,'SELECT t.* FROM tasks t JOIN users s ON s.id=t.student_id WHERE t.group_id=? AND t.teacher_id=? AND t.deleted_at IS NULL AND s.deleted_at IS NULL',[$source['group_id'],$user['id']])->fetchAll()
             : [$source];
         $currentByStudent=[]; foreach($current as $task)$currentByStudent[(int)$task['student_id']]=$task;
         $marks=implode(',',array_fill(0,count($studentIds),'?'));
-        $selectedStudents=run($db,"SELECT id,active FROM users WHERE id IN ($marks) AND role='student' AND teacher_id=? AND deleted_at IS NULL",array_merge($studentIds,[$user['id']]))->fetchAll();
+        $selectedStudents=run($db,"SELECT u.id,u.active FROM users u JOIN student_teachers st ON st.student_id=u.id WHERE u.id IN ($marks) AND u.role='student' AND st.teacher_id=? AND u.deleted_at IS NULL",array_merge($studentIds,[$user['id']]))->fetchAll();
         if(count($selectedStudents)!==count($studentIds))fail('Один из учеников не найден.',404);
         foreach($selectedStudents as $student)if(!(int)$student['active']&&!isset($currentByStudent[(int)$student['id']]))fail('Сначала возобновите доступ выбранному ученику.');
         $groupId=count($studentIds)>1?($source['group_id']?:bin2hex(random_bytes(12))):null;
@@ -850,7 +899,7 @@ try {
             }
             foreach($studentIds as $studentId){
                 if(isset($resultIds[$studentId]))continue;
-                run($db,'INSERT INTO tasks(student_id,title,subject,description,resource_url,due_date,max_score,group_id) VALUES(?,?,?,?,?,?,?,?)',[$studentId,$source['title'],$source['subject'],$source['description'],$source['resource_url'],$source['due_date'],$source['max_score'],$groupId]);
+                run($db,'INSERT INTO tasks(student_id,teacher_id,title,subject,description,resource_url,due_date,max_score,group_id) VALUES(?,?,?,?,?,?,?,?,?)',[$studentId,$user['id'],$source['title'],$source['subject'],$source['description'],$source['resource_url'],$source['due_date'],$source['max_score'],$groupId]);
                 $newId=(int)$db->lastInsertId();$resultIds[$studentId]=$newId;
                 foreach($materials as $material){
                     $from=$private.'/uploads/'.$material['storage_name'];
@@ -873,13 +922,13 @@ try {
         $max = filter_var($data['max_score'] ?? null,FILTER_VALIDATE_INT);
         if ($max === false || $max < 1 || $max > 1000) fail('Максимальный балл: от 1 до 1000.');
         if (!empty($data['id'])) {
-            $id = idValue($data,'id'); $task = run($db,'SELECT t.* FROM tasks t JOIN users s ON s.id=t.student_id WHERE t.id=? AND s.teacher_id=? AND t.deleted_at IS NULL AND s.deleted_at IS NULL',[$id,$user['id']])->fetch();
+            $id = idValue($data,'id'); $task = run($db,'SELECT t.* FROM tasks t JOIN users s ON s.id=t.student_id WHERE t.id=? AND t.teacher_id=? AND t.deleted_at IS NULL AND s.deleted_at IS NULL',[$id,$user['id']])->fetch();
             if (!$task) fail('Задание не найдено.',404);
             $studentId = idValue($data,'student_id');
             if ((int)$task['student_id'] !== $studentId) fail('Нельзя перенести историю задания другому ученику. Создайте новое задание.');
             $groupScope = ($data['scope'] ?? '') === 'group' && !empty($task['group_id']);
             $targets = $groupScope
-                ? run($db,'SELECT t.id,t.score FROM tasks t JOIN users s ON s.id=t.student_id WHERE t.group_id=? AND s.teacher_id=? AND t.deleted_at IS NULL AND s.deleted_at IS NULL',[$task['group_id'],$user['id']])->fetchAll()
+                ? run($db,'SELECT t.id,t.score FROM tasks t JOIN users s ON s.id=t.student_id WHERE t.group_id=? AND t.teacher_id=? AND t.deleted_at IS NULL AND s.deleted_at IS NULL',[$task['group_id'],$user['id']])->fetchAll()
                 : [['id'=>$id,'score'=>$task['score']]];
             foreach ($targets as $target) if ($target['score'] !== null && (int)$target['score'] > $max) fail('Максимальный балл меньше уже выставленной оценки.');
             $ids = array_map(fn($target)=>(int)$target['id'],$targets);
@@ -895,13 +944,13 @@ try {
             }
             $studentIds=array_values(array_unique($studentIds));
             $marks=implode(',',array_fill(0,count($studentIds),'?'));
-            $found=run($db,"SELECT id FROM users WHERE id IN ($marks) AND role='student' AND teacher_id=? AND active=1 AND deleted_at IS NULL",array_merge($studentIds,[$user['id']]))->fetchAll();
+            $found=run($db,"SELECT u.id FROM users u JOIN student_teachers st ON st.student_id=u.id WHERE u.id IN ($marks) AND u.role='student' AND st.teacher_id=? AND u.active=1 AND u.deleted_at IS NULL",array_merge($studentIds,[$user['id']]))->fetchAll();
             if (count($found)!==count($studentIds)) fail('Один из учеников не найден или его доступ приостановлен.',404);
             $groupId=count($studentIds)>1?bin2hex(random_bytes(12)):null; $ids=[];
             $db->exec('BEGIN IMMEDIATE');
             try {
                 foreach ($studentIds as $studentId) {
-                    run($db,'INSERT INTO tasks(student_id,title,subject,description,resource_url,due_date,max_score,group_id) VALUES(?,?,?,?,?,?,?,?)',[$studentId,$title,$subject,$description,$resource,$due,$max,$groupId]);
+                    run($db,'INSERT INTO tasks(student_id,teacher_id,title,subject,description,resource_url,due_date,max_score,group_id) VALUES(?,?,?,?,?,?,?,?,?)',[$studentId,$user['id'],$title,$subject,$description,$resource,$due,$max,$groupId]);
                     $ids[]=(int)$db->lastInsertId();
                 }
                 $db->exec('COMMIT');
@@ -912,19 +961,19 @@ try {
     }
     if ($action === 'delete_task') {
         requireAdmin($user); $id = idValue($data,'id');
-        $task=run($db,'SELECT t.group_id FROM tasks t JOIN users s ON s.id=t.student_id WHERE t.id=? AND s.teacher_id=? AND t.deleted_at IS NULL AND s.deleted_at IS NULL',[$id,$user['id']])->fetch();
+        $task=run($db,'SELECT t.group_id FROM tasks t JOIN users s ON s.id=t.student_id WHERE t.id=? AND t.teacher_id=? AND t.deleted_at IS NULL AND s.deleted_at IS NULL',[$id,$user['id']])->fetch();
         if (!$task) fail('Задание не найдено.',404);
         $groupScope=($data['scope'] ?? '')==='group'&&!empty($task['group_id']);
         $changed=$groupScope
-            ? run($db,"UPDATE tasks SET deleted_at=strftime('%Y-%m-%dT%H:%M:%SZ','now'),updated_at=strftime('%Y-%m-%dT%H:%M:%SZ','now') WHERE group_id=? AND student_id IN (SELECT id FROM users WHERE teacher_id=?) AND deleted_at IS NULL",[$task['group_id'],$user['id']])
-            : run($db,"UPDATE tasks SET deleted_at=strftime('%Y-%m-%dT%H:%M:%SZ','now'),updated_at=strftime('%Y-%m-%dT%H:%M:%SZ','now') WHERE id=? AND student_id IN (SELECT id FROM users WHERE teacher_id=?) AND deleted_at IS NULL",[$id,$user['id']]);
+            ? run($db,"UPDATE tasks SET deleted_at=strftime('%Y-%m-%dT%H:%M:%SZ','now'),updated_at=strftime('%Y-%m-%dT%H:%M:%SZ','now') WHERE group_id=? AND teacher_id=? AND deleted_at IS NULL",[$task['group_id'],$user['id']])
+            : run($db,"UPDATE tasks SET deleted_at=strftime('%Y-%m-%dT%H:%M:%SZ','now'),updated_at=strftime('%Y-%m-%dT%H:%M:%SZ','now') WHERE id=? AND teacher_id=? AND deleted_at IS NULL",[$id,$user['id']]);
         if (!$changed->rowCount()) fail('Задание не найдено.',404);
         reply(['ok'=>true,'count'=>$changed->rowCount()]);
     }
     if ($action === 'submit' || $action === 'review') {
         $id=idValue($data,'id');
         // Scope the SQL query itself, not just the UI, to the signed-in student.
-        $task = $user['role'] === 'admin' ? run($db,'SELECT t.* FROM tasks t JOIN users s ON s.id=t.student_id WHERE t.id=? AND s.teacher_id=? AND t.deleted_at IS NULL AND s.deleted_at IS NULL',[$id,$user['id']])->fetch() : run($db,'SELECT * FROM tasks WHERE id=? AND student_id=? AND deleted_at IS NULL',[$id,$user['id']])->fetch();
+        $task = $user['role'] === 'admin' ? run($db,'SELECT t.* FROM tasks t JOIN users s ON s.id=t.student_id WHERE t.id=? AND t.teacher_id=? AND t.deleted_at IS NULL AND s.deleted_at IS NULL',[$id,$user['id']])->fetch() : run($db,'SELECT * FROM tasks WHERE id=? AND student_id=? AND teacher_id=? AND deleted_at IS NULL',[$id,$user['id'],activeTeacherId($db,$user)])->fetch();
         if (!$task) fail('Задание не найдено.',404);
         if ($action === 'submit') {
             if ($user['role'] !== 'student') fail('Решение отправляет ученик.',403);
