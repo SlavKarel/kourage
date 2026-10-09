@@ -53,6 +53,7 @@ function Board() {
   const pointerRef = useRef(null)
   const pointerButtonRef = useRef('up')
   const selectedRef = useRef({})
+  const collaboratorsSignatureRef = useRef('')
 
   useEffect(() => {
     if (!Number.isInteger(boardId) || boardId < 1) {
@@ -69,7 +70,7 @@ function Board() {
       if (sceneChanged) editor.updateScene({ elements: [...elementsRef.current.values()] })
     }
 
-    const applyRecords = (records, removed = []) => {
+    const applyRecords = (records, removed = [], render = true) => {
       let sceneChanged = false
       const addedFiles = []
       for (const record of records || []) {
@@ -98,16 +99,25 @@ function Board() {
           knownFilesRef.current.delete(id)
         }
       }
-      renderRemoteScene(sceneChanged, addedFiles)
+      if (render) renderRemoteScene(sceneChanged, addedFiles)
+      return { sceneChanged, addedFiles }
     }
 
-    const applyEvents = events => {
+    const applyEvents = (events, localRevision = 0) => {
+      let sceneChanged = false
+      const addedFiles = []
       for (const event of events || []) {
         const revision = Number(event.revision) || 0
         if (revision <= revisionRef.current) continue
-        applyRecords(event.changed, event.removed)
+        const isOwnRoundTrip = revision === Number(localRevision) && Number(event.actor_id) === Number(userRef.current?.id)
+        if (!isOwnRoundTrip) {
+          const applied = applyRecords(event.changed, event.removed, false)
+          sceneChanged ||= applied.sceneChanged
+          addedFiles.push(...applied.addedFiles)
+        }
         revisionRef.current = revision
       }
+      renderRemoteScene(sceneChanged, addedFiles)
     }
 
     const flush = async () => {
@@ -122,7 +132,7 @@ function Board() {
           csrf: csrfRef.current,
           body: { board_id: boardId, since: revisionRef.current, changed, removed },
         })
-        applyEvents(result.events)
+        applyEvents(result.events, result.revision)
         revisionRef.current = Math.max(revisionRef.current, Number(result.revision) || 0)
       } catch {
         for (const record of changed) queueRef.current.changed.set(record.id, record)
@@ -130,7 +140,7 @@ function Board() {
         window.setTimeout(flush, 1200)
       } finally {
         sendingRef.current = false
-        if (queueRef.current.changed.size || queueRef.current.removed.size) sendTimerRef.current = window.setTimeout(flush, 120)
+        if (queueRef.current.changed.size || queueRef.current.removed.size) sendTimerRef.current = window.setTimeout(flush, 180)
       }
     }
     flushRef.current = flush
@@ -156,7 +166,7 @@ function Board() {
       const user = userRef.current
       if (stoppedRef.current) return
       if (!editor || !user) {
-        presenceTimer = window.setTimeout(syncPresence, 450)
+        presenceTimer = window.setTimeout(syncPresence, 800)
         return
       }
       const color = palette[Number(user.id) % palette.length]
@@ -187,9 +197,13 @@ function Board() {
             button: presence.button || 'up',
           })
         }
-        editor.updateScene({ collaborators })
+        const signature = JSON.stringify([...collaborators].map(([id, peer]) => [id, peer.pointer, peer.selectedElementIds, peer.button]))
+        if (signature !== collaboratorsSignatureRef.current) {
+          collaboratorsSignatureRef.current = signature
+          editor.updateScene({ collaborators })
+        }
       } catch { /* Presence is ephemeral and restored by the next heartbeat. */ }
-      presenceTimer = window.setTimeout(syncPresence, 450)
+      presenceTimer = window.setTimeout(syncPresence, 800)
     }
 
     ;(async () => {
@@ -262,7 +276,7 @@ function Board() {
     }
     if (changed) {
       clearTimeout(sendTimerRef.current)
-      sendTimerRef.current = window.setTimeout(() => flushRef.current(), 120)
+      sendTimerRef.current = window.setTimeout(() => flushRef.current(), 180)
     }
   }
 
