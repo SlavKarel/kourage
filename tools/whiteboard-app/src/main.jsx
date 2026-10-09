@@ -45,7 +45,11 @@ function Board() {
   const queueRef = useRef({ changed: new Map(), removed: new Set() })
   const sendingRef = useRef(false)
   const sendTimerRef = useRef(0)
+  const changeTimerRef = useRef(0)
   const flushRef = useRef(() => {})
+  const flushRemoteRef = useRef(() => {})
+  const pendingChangeRef = useRef(null)
+  const deferredRemoteRef = useRef({ sceneChanged: false, files: new Map() })
   const elementsRef = useRef(new Map())
   const filesRef = useRef({})
   const signaturesRef = useRef(new Map())
@@ -65,10 +69,20 @@ function Board() {
 
     const renderRemoteScene = (sceneChanged, addedFiles) => {
       const editor = excalidrawRef.current
-      if (!editor) return
-      if (addedFiles.length) editor.addFiles(addedFiles)
+      const deferred = deferredRemoteRef.current
+      if (!editor || pointerButtonRef.current === 'down') {
+        deferred.sceneChanged ||= sceneChanged
+        for (const file of addedFiles) deferred.files.set(file.id, file)
+        return
+      }
+      sceneChanged ||= deferred.sceneChanged
+      for (const file of addedFiles) deferred.files.set(file.id, file)
+      const files = [...deferred.files.values()]
+      deferredRemoteRef.current = { sceneChanged: false, files: new Map() }
+      if (files.length) editor.addFiles(files)
       if (sceneChanged) editor.updateScene({ elements: [...elementsRef.current.values()] })
     }
+    flushRemoteRef.current = () => renderRemoteScene(false, [])
 
     const applyRecords = (records, removed = [], render = true) => {
       let sceneChanged = false
@@ -236,14 +250,19 @@ function Board() {
     return () => {
       stoppedRef.current = true
       clearTimeout(sendTimerRef.current)
+      clearTimeout(changeTimerRef.current)
       clearTimeout(pollTimer)
       clearTimeout(presenceTimer)
     }
   }, [])
 
-  const handleChange = (elements, appState, files) => {
-    if (state.status !== 'ready') return
-    selectedRef.current = appState.selectedElementIds || {}
+  const processPendingChange = () => {
+    clearTimeout(changeTimerRef.current)
+    changeTimerRef.current = 0
+    const pending = pendingChangeRef.current
+    pendingChangeRef.current = null
+    if (!pending || state.status !== 'ready') return
+    const { elements, files } = pending
     let changed = false
     const currentIds = new Set(elements.map(element => element.id))
     for (const element of elements) {
@@ -280,6 +299,13 @@ function Board() {
     }
   }
 
+  const handleChange = (elements, appState, files) => {
+    if (state.status !== 'ready') return
+    selectedRef.current = appState.selectedElementIds || {}
+    pendingChangeRef.current = { elements, files }
+    if (!changeTimerRef.current) changeTimerRef.current = window.setTimeout(processPendingChange, 100)
+  }
+
   if (state.status !== 'ready') return <Loading error={state.error} />
   return <div className="whiteboard-shell" aria-label={state.title}>
     <Excalidraw
@@ -287,8 +313,13 @@ function Board() {
       excalidrawAPI={apiObject => { excalidrawRef.current = apiObject }}
       onChange={handleChange}
       onPointerUpdate={payload => {
+        const wasDrawing = pointerButtonRef.current === 'down'
         pointerRef.current = payload?.pointer || null
         pointerButtonRef.current = payload?.button || 'up'
+        if (wasDrawing && pointerButtonRef.current !== 'down') {
+          processPendingChange()
+          flushRemoteRef.current()
+        }
       }}
       isCollaborating
       langCode="ru-RU"
