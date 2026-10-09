@@ -351,8 +351,8 @@ try {
                 run($db,'INSERT INTO whiteboard_changes(board_id,revision,changed_json,removed_json,actor_id,created_at) VALUES(?,?,?,?,?,?)',[$id,$revision,json_encode(array_values($changed),JSON_UNESCAPED_UNICODE|JSON_UNESCAPED_SLASHES),json_encode(array_values($removed),JSON_UNESCAPED_UNICODE|JSON_UNESCAPED_SLASHES),$user['id'],time()]);
                 run($db,"UPDATE whiteboards SET sync_revision=?,updated_at=strftime('%Y-%m-%dT%H:%M:%SZ','now') WHERE id=?",[$revision,$id]);
                 if($revision%100===0)run($db,'DELETE FROM whiteboard_changes WHERE board_id=? AND revision<?',[$id,max(1,$revision-2000)]);
-                $events=$boardEvents($id,$since);$db->commit();
-            }catch(Throwable $error){if($db->inTransaction())$db->rollBack();throw $error;}
+                $events=$boardEvents($id,$since);$db->exec('COMMIT');
+            }catch(Throwable $error){if($db->inTransaction())$db->exec('ROLLBACK');throw $error;}
             reply(['revision'=>$revision,'events'=>$events]);
         }
         if($action==='whiteboard_presence'){
