@@ -302,8 +302,9 @@ try {
                 $boards=$studentId?run($db,"SELECT id,student_id,title,provider,created_at,updated_at FROM whiteboards WHERE teacher_id=? AND student_id=? AND deleted_at IS NULL ORDER BY updated_at DESC,id DESC",[$user['id'],$studentId])->fetchAll():[];
                 reply(['user'=>publicUser($user),'students'=>$students,'student_id'=>$studentId,'boards'=>$boards,'csrf'=>$_SESSION['csrf']]);
             }
-            $boards=run($db,"SELECT id,student_id,title,provider,created_at,updated_at FROM whiteboards WHERE student_id=? AND teacher_id=? AND deleted_at IS NULL ORDER BY updated_at DESC,id DESC",[$user['id'],activeTeacherId($db,$user)])->fetchAll();
-            reply(['user'=>publicUser($user),'students'=>[],'student_id'=>(int)$user['id'],'boards'=>$boards,'csrf'=>$_SESSION['csrf']]);
+            $contexts=studentContexts($db,$user);$activeTeacherId=activeTeacherId($db,$user);
+            $boards=run($db,"SELECT id,student_id,title,provider,created_at,updated_at FROM whiteboards WHERE student_id=? AND teacher_id=? AND deleted_at IS NULL ORDER BY updated_at DESC,id DESC",[$user['id'],$activeTeacherId])->fetchAll();
+            reply(['user'=>publicUser($user),'students'=>[],'student_id'=>(int)$user['id'],'boards'=>$boards,'contexts'=>$contexts,'active_teacher_id'=>$activeTeacherId,'csrf'=>$_SESSION['csrf']]);
         }
         if($action==='whiteboard_create'){
             requireAdmin($user);$studentId=idValue($data,'student_id');$title=textValue($data,'title',160,true);
