@@ -229,10 +229,13 @@ try {
     $method = $_SERVER['REQUEST_METHOD'];
     $data = [];
     if ($method === 'POST') {
-        if ((int)($_SERVER['CONTENT_LENGTH'] ?? 0) > (in_array($action,['upload','classwork_upload','homework_file_upload','bank_file_upload','whiteboard_sync'],true) ? 11*1024*1024 : 200000)) fail('Слишком большой запрос.',413);
+        $largeUploadActions=['upload','classwork_upload','homework_file_upload','bank_file_upload','whiteboard_sync'];
+        $largeEditorActions=['editor_sync','editor_save','editor_run_update'];
+        $requestLimit=in_array($action,$largeUploadActions,true)?11*1024*1024:(in_array($action,$largeEditorActions,true)?11*1024*1024:200000);
+        if ((int)($_SERVER['CONTENT_LENGTH'] ?? 0) > $requestLimit) fail('Слишком большой запрос.',413);
         if (!hash_equals($_SESSION['csrf'],$_SERVER['HTTP_X_CSRF_TOKEN'] ?? '')) fail('Обновите страницу и повторите действие.',403);
         if (in_array($action,['upload','classwork_upload','homework_file_upload','bank_file_upload'],true)) { $data = $_POST; } else {
-        $jsonLimit=$action==='whiteboard_sync'?11*1024*1024:200000;
+        $jsonLimit=$action==='whiteboard_sync'?11*1024*1024:(in_array($action,$largeEditorActions,true)?11*1024*1024:200000);
         $raw = file_get_contents('php://input',false,null,0,$jsonLimit+1);
         if (strlen($raw) > $jsonLimit) fail('Слишком большой запрос.',413);
         $data = json_decode($raw,true);
@@ -498,13 +501,13 @@ try {
         if($action==='editor_file'){
             $record=run($db,'SELECT * FROM classwork_files WHERE id=? AND student_id=? AND teacher_id=? AND deleted=0',[idValue($_GET,'id'),$studentId,$editorTeacherId])->fetch();
             if(!$record)fail('Файл не найден.',404);$ext=strtolower(pathinfo($record['name'],PATHINFO_EXTENSION));if(!in_array($ext,$editable,true))fail('Этот файл нельзя редактировать в браузере.',415);
-            $path=$directory.'/'.$record['storage_name'];if(!is_file($path))fail('Файл отсутствует на сервере.',404);$size=filesize($path);if($size===false||$size>200000)fail('В редакторе можно открыть текстовый файл не больше 200 КБ.',413);$content=file_get_contents($path);if($content===false||!preg_match('//u',$content))fail('Файл не является текстовым.',415);
+            $path=$directory.'/'.$record['storage_name'];if(!is_file($path))fail('Файл отсутствует на сервере.',404);$size=filesize($path);if($size===false||$size>5*1024*1024)fail('В редакторе можно открыть текстовый файл не больше 5 МБ.',413);$content=file_get_contents($path);if($content===false||!preg_match('//u',$content))fail('Файл не является текстовым.',415);
             reply(['id'=>(int)$record['id'],'student_id'=>(int)$record['student_id'],'name'=>$record['name'],'path'=>$record['relative_path'],'content'=>$content,'revision'=>(int)$record['revision'],'updated_at'=>$record['updated_at']]);
         }
         if($action==='editor_presence'){
             $fileId=isset($data['file_id'])&&$data['file_id']!==null?(int)$data['file_id']:null;if($fileId!==null&&$fileId<1)fail('Некорректный файл.');
             if($fileId&&!run($db,'SELECT id FROM classwork_files WHERE id=? AND student_id=? AND teacher_id=? AND deleted=0',[$fileId,$studentId,$editorTeacherId])->fetch())fail('Файл не найден.',404);
-            $cursorStart=max(0,min(200000,(int)($data['cursor_start']??0)));$cursorEnd=max($cursorStart,min(200000,(int)($data['cursor_end']??$cursorStart)));
+            $cursorStart=max(0,min(5*1024*1024,(int)($data['cursor_start']??0)));$cursorEnd=max($cursorStart,min(5*1024*1024,(int)($data['cursor_end']??$cursorStart)));
             run($db,'INSERT INTO editor_presence_context(student_id,teacher_id,user_id,file_id,cursor_start,cursor_end,last_seen) VALUES(?,?,?,?,?,?,?) ON CONFLICT(student_id,teacher_id,user_id) DO UPDATE SET file_id=excluded.file_id,cursor_start=excluded.cursor_start,cursor_end=excluded.cursor_end,last_seen=excluded.last_seen',[$studentId,$editorTeacherId,$user['id'],$fileId,$cursorStart,$cursorEnd,time()]);
             run($db,'DELETE FROM editor_presence_context WHERE last_seen < ?',[time()-45]);
             $presence=run($db,"SELECT p.user_id,p.file_id,p.cursor_start,p.cursor_end,p.last_seen,u.name,u.role FROM editor_presence_context p JOIN users u ON u.id=p.user_id WHERE p.student_id=? AND p.teacher_id=? AND p.last_seen>=? ORDER BY u.role,u.name",[$studentId,$editorTeacherId,time()-45])->fetchAll();
@@ -513,10 +516,10 @@ try {
         if($action==='editor_sync'){
             $fileId=idValue($data,'file_id');$known=max(0,(int)($data['revision']??0));
             $record=run($db,'SELECT * FROM classwork_files WHERE id=? AND student_id=? AND teacher_id=? AND deleted=0',[$fileId,$studentId,$editorTeacherId])->fetch();if(!$record)fail('Файл не найден.',404);
-            $cursorStart=max(0,min(200000,(int)($data['cursor_start']??0)));$cursorEnd=max(0,min(200000,(int)($data['cursor_end']??$cursorStart)));
+            $cursorStart=max(0,min(5*1024*1024,(int)($data['cursor_start']??0)));$cursorEnd=max(0,min(5*1024*1024,(int)($data['cursor_end']??$cursorStart)));
             run($db,'INSERT INTO editor_presence_context(student_id,teacher_id,user_id,file_id,cursor_start,cursor_end,last_seen) VALUES(?,?,?,?,?,?,?) ON CONFLICT(student_id,teacher_id,user_id) DO UPDATE SET file_id=excluded.file_id,cursor_start=excluded.cursor_start,cursor_end=excluded.cursor_end,last_seen=excluded.last_seen',[$studentId,$editorTeacherId,$user['id'],$fileId,$cursorStart,$cursorEnd,time()]);
             if(array_key_exists('content',$data)){
-                $content=$data['content'];if(!is_string($content)||strlen($content)>190000||!preg_match('//u',$content))fail('Код должен быть текстом не больше 190 КБ.');$expected=(int)($data['expected_revision']??0);
+                $content=$data['content'];if(!is_string($content)||strlen($content)>5*1024*1024||!preg_match('//u',$content))fail('Код должен быть текстом не больше 5 МБ.');$expected=(int)($data['expected_revision']??0);
                 $db->exec('BEGIN IMMEDIATE');try{$record=run($db,'SELECT * FROM classwork_files WHERE id=? AND student_id=? AND teacher_id=? AND deleted=0',[$fileId,$studentId,$editorTeacherId])->fetch();if(!$record){$db->exec('ROLLBACK');fail('Файл не найден.',404);}if((int)$record['revision']!==$expected){$path=$directory.'/'.$record['storage_name'];$remote=is_file($path)?file_get_contents($path):false;$db->exec('ROLLBACK');if($remote===false)fail('Файл отсутствует на сервере.',404);reply(['error'=>'Файл уже изменён другим участником.','content'=>$remote,'revision'=>(int)$record['revision']],409);}
                     $ext=strtolower(pathinfo($record['name'],PATHINFO_EXTENSION));if(!in_array($ext,$editable,true)){$db->exec('ROLLBACK');fail('Этот файл нельзя редактировать в браузере.',415);}$path=$directory.'/'.$record['storage_name'];$temp=tempnam($directory,'edit-');if($temp===false||file_put_contents($temp,$content,LOCK_EX)===false){if($temp)@unlink($temp);$db->exec('ROLLBACK');fail('Не удалось сохранить файл.',503);}chmod($temp,0600);if(!rename($temp,$path)){@unlink($temp);$db->exec('ROLLBACK');fail('Не удалось заменить файл.',503);}run($db,"UPDATE classwork_files SET uploader_id=?,size=?,revision=revision+1,updated_at=strftime('%Y-%m-%dT%H:%M:%SZ','now') WHERE id=?",[$user['id'],strlen($content),$fileId]);$db->exec('COMMIT');$known=$expected+1;
                 }catch(Throwable $error){if($db->inTransaction())$db->exec('ROLLBACK');throw $error;}
@@ -571,7 +574,7 @@ try {
             reply(['id'=>$id,'name'=>$name,'path'=>$relative,'size'=>0,'revision'=>1],201);
         }
         if($action==='editor_save'){
-            $id=idValue($data,'id');$content=$data['content']??null;if(!is_string($content)||strlen($content)>200000||!preg_match('//u',$content))fail('Код должен быть текстом не больше 200 КБ.');$expected=filter_var($data['revision']??null,FILTER_VALIDATE_INT);if($expected===false||$expected<1)fail('Некорректная версия файла.');
+            $id=idValue($data,'id');$content=$data['content']??null;if(!is_string($content)||strlen($content)>5*1024*1024||!preg_match('//u',$content))fail('Код должен быть текстом не больше 5 МБ.');$expected=filter_var($data['revision']??null,FILTER_VALIDATE_INT);if($expected===false||$expected<1)fail('Некорректная версия файла.');
             $db->exec('BEGIN IMMEDIATE');try{$record=run($db,'SELECT * FROM classwork_files WHERE id=? AND student_id=? AND teacher_id=? AND deleted=0',[$id,$studentId,$editorTeacherId])->fetch();if(!$record){$db->exec('ROLLBACK');fail('Файл не найден.',404);}if((int)$record['revision']!==(int)$expected){$path=$directory.'/'.$record['storage_name'];$current=is_file($path)?file_get_contents($path):false;$db->exec('ROLLBACK');if($current===false)fail('Файл отсутствует на сервере.',404);reply(['error'=>'Файл уже изменён другим участником.','content'=>$current,'revision'=>(int)$record['revision'],'updated_at'=>$record['updated_at']],409);}
                 $ext=strtolower(pathinfo($record['name'],PATHINFO_EXTENSION));if(!in_array($ext,$editable,true)){$db->exec('ROLLBACK');fail('Этот файл нельзя редактировать в браузере.',415);}if(!is_dir($directory)){$db->exec('ROLLBACK');fail('Папка файлов недоступна.',503);}$path=$directory.'/'.$record['storage_name'];$temp=tempnam($directory,'edit-');if($temp===false||file_put_contents($temp,$content,LOCK_EX)===false){if($temp)@unlink($temp);$db->exec('ROLLBACK');fail('Не удалось сохранить файл.',503);}chmod($temp,0600);if(!rename($temp,$path)){@unlink($temp);$db->exec('ROLLBACK');fail('Не удалось заменить файл.',503);}run($db,"UPDATE classwork_files SET uploader_id=?,size=?,revision=revision+1,updated_at=strftime('%Y-%m-%dT%H:%M:%SZ','now') WHERE id=?",[$user['id'],strlen($content),$id]);$revision=(int)$expected+1;$db->exec('COMMIT');
             }catch(Throwable $error){if($db->inTransaction())$db->exec('ROLLBACK');throw $error;}
