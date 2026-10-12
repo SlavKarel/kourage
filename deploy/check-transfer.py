@@ -6,12 +6,14 @@ import subprocess
 root = Path(__file__).resolve().parents[1]
 files = (root / 'deploy/public-files.txt').read_text().splitlines()
 assert files == [
-    '.htaccess', 'api.php', 'assets/app.js', 'assets/bank.js', 'assets/builder.js',
-    'assets/classwork.js', 'assets/editor.js', 'assets/excalidraw-license.txt', 'assets/favicon.svg',
-    'assets/homework.js', 'assets/kourage-turtle.txt', 'assets/meeting.js', 'assets/python-worker.js', 'assets/style.css',
-    'assets/whiteboard-app.css', 'assets/whiteboard-app.js', 'assets/whiteboard.js',
-    'bank.html', 'builder.html', 'classwork.html', 'editor.html',
-    'homework.html', 'index.html', 'meeting.html', 'whiteboard-app.html', 'whiteboard.html',
+    '.htaccess', 'api.php', 'assets/app.js', 'assets/apple-touch-icon.png',
+    'assets/bank.js', 'assets/builder.js', 'assets/classwork.js', 'assets/editor.js',
+    'assets/excalidraw-license.txt', 'assets/favicon-32.png', 'assets/favicon.svg', 'assets/homework.js',
+    'assets/icon-192.png', 'assets/icon-512.png', 'assets/kourage-turtle.txt', 'assets/meeting.js',
+    'assets/python-worker.js', 'assets/style.css', 'assets/whiteboard-app.css', 'assets/whiteboard-app.js',
+    'assets/whiteboard.js', 'bank.html', 'builder.html', 'classwork.html',
+    'editor.html', 'homework.html', 'index.html', 'manifest.webmanifest',
+    'meeting.html', 'whiteboard-app.html', 'whiteboard.html',
 ]
 with TemporaryDirectory(prefix='kourage-transfer-check-') as folder:
     site = Path(folder) / 'courage'
