@@ -1,5 +1,6 @@
 <?php
 declare(strict_types=1);
+require_once __DIR__.'/push.php';
 // PHP 8.1+; PDO SQLite. Keep ../private OUTSIDE the public directory.
 ini_set('display_errors', '0');
 header('Content-Type: application/json; charset=utf-8');
@@ -186,6 +187,8 @@ try {
     CREATE INDEX IF NOT EXISTS idx_whiteboard_changes_board_revision ON whiteboard_changes(board_id,revision);
     CREATE TABLE IF NOT EXISTS whiteboard_presence (board_id INTEGER NOT NULL REFERENCES whiteboards(id) ON DELETE CASCADE, user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE, presence_json TEXT NOT NULL, last_seen INTEGER NOT NULL, PRIMARY KEY(board_id,user_id));
     CREATE INDEX IF NOT EXISTS idx_whiteboard_presence_seen ON whiteboard_presence(board_id,last_seen);
+    CREATE TABLE IF NOT EXISTS push_subscriptions (id INTEGER PRIMARY KEY, user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE, endpoint TEXT NOT NULL UNIQUE, p256dh TEXT NOT NULL, auth TEXT NOT NULL, user_agent TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now')), updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now')));
+    CREATE INDEX IF NOT EXISTS idx_push_subscriptions_user ON push_subscriptions(user_id,updated_at DESC);
     CREATE TABLE IF NOT EXISTS attempts (key TEXT PRIMARY KEY, count INTEGER NOT NULL, until INTEGER NOT NULL);");
     $userColumns = array_column($db->query('PRAGMA table_info(users)')->fetchAll(),'name');
     if (!in_array('deleted_at',$userColumns,true)) $db->exec('ALTER TABLE users ADD COLUMN deleted_at TEXT');
@@ -250,7 +253,7 @@ try {
     if (!$user) $user = restoreRemember($db,$rememberCookie,$secure);
     if ($user) $_SESSION['last_seen'] = time();
     if ($action === 'bootstrap' && $method === 'GET') reply(['installed'=>$installed,'user'=>$user ? publicUser($user) : null,'csrf'=>$_SESSION['csrf']]);
-    if ($method !== 'POST' && !in_array($action,['state','download','preview','classwork_state','classwork_download','classwork_preview','editor_state','editor_file','bank_state','bank_file_download','bank_file_view','homework_detail','homework_file_download','meeting_state','meeting_redirect','whiteboard_state','whiteboard_document'],true)) fail('Используйте POST.',405);
+    if ($method !== 'POST' && !in_array($action,['state','download','preview','classwork_state','classwork_download','classwork_preview','editor_state','editor_file','bank_state','bank_file_download','bank_file_view','homework_detail','homework_file_download','meeting_state','meeting_redirect','whiteboard_state','whiteboard_document','push_state'],true)) fail('Используйте POST.',405);
     if ($action === 'login' || $action === 'setup') {
         $remember = $data['remember'] ?? false;
         if (!is_bool($remember)) fail('Некорректная настройка запоминания входа.');
@@ -287,6 +290,31 @@ try {
         reply(['user'=>publicUser($user),'csrf'=>$_SESSION['csrf']]);
     }
     if (!$user) fail('Войдите в свой кабинет.',401);
+    if ($action === 'push_state') {
+        try {
+            $keys=pushVapidKeys($private);
+            $count=(int)run($db,'SELECT COUNT(*) FROM push_subscriptions WHERE user_id=?',[$user['id']])->fetchColumn();
+            reply(['supported'=>true,'public_key'=>$keys['public'],'subscribed'=>$count>0,'csrf'=>$_SESSION['csrf']]);
+        } catch (Throwable $error) {
+            error_log('Kourage push setup failed: '.$error->getMessage());
+            reply(['supported'=>false,'csrf'=>$_SESSION['csrf']]);
+        }
+    }
+    if ($action === 'push_subscribe') {
+        $endpoint=textValue($data,'endpoint',2048,true);$p256dh=textValue($data,'p256dh',256,true);$auth=textValue($data,'auth',128,true);
+        if(!str_starts_with($endpoint,'https://')||!filter_var($endpoint,FILTER_VALIDATE_URL))fail('Некорректная подписка на уведомления.');
+        if(!preg_match('/^[A-Za-z0-9_-]+$/D',$p256dh)||!preg_match('/^[A-Za-z0-9_-]+$/D',$auth))fail('Некорректные ключи уведомлений.');
+        $userAgent=substr((string)($_SERVER['HTTP_USER_AGENT']??''),0,500);
+        run($db,"INSERT INTO push_subscriptions(user_id,endpoint,p256dh,auth,user_agent) VALUES(?,?,?,?,?) ON CONFLICT(endpoint) DO UPDATE SET user_id=excluded.user_id,p256dh=excluded.p256dh,auth=excluded.auth,user_agent=excluded.user_agent,updated_at=strftime('%Y-%m-%dT%H:%M:%SZ','now')",[$user['id'],$endpoint,$p256dh,$auth,$userAgent]);
+        $stale=run($db,'SELECT id FROM push_subscriptions WHERE user_id=? ORDER BY updated_at DESC LIMIT -1 OFFSET 8',[$user['id']])->fetchAll();
+        foreach($stale as $subscription)run($db,'DELETE FROM push_subscriptions WHERE id=?',[$subscription['id']]);
+        reply(['ok'=>true]);
+    }
+    if ($action === 'push_unsubscribe') {
+        $endpoint=textValue($data,'endpoint',2048,true);
+        run($db,'DELETE FROM push_subscriptions WHERE user_id=? AND endpoint=?',[$user['id'],$endpoint]);
+        reply(['ok'=>true]);
+    }
     if (str_starts_with($action,'whiteboard_')) {
         $boardForUser=function(int $id)use($db,$user):array{
             $board=$user['role']==='admin'?run($db,'SELECT * FROM whiteboards WHERE id=? AND teacher_id=? AND deleted_at IS NULL',[$id,$user['id']])->fetch():run($db,'SELECT * FROM whiteboards WHERE id=? AND student_id=? AND deleted_at IS NULL',[$id,$user['id']])->fetch();
@@ -387,7 +415,9 @@ try {
             $roomName='Kourage'.bin2hex(random_bytes(16));$expires=time()+6*60*60;
             $roomUrl='https://meet.jit.si/'.rawurlencode($roomName);
             run($db,'INSERT INTO meetings(teacher_id,student_id,room_name,room_url,expires_at) VALUES(?,?,?,?,?)',[$user['id'],$studentId,$roomName,$roomUrl,$expires]);
-            reply(['meeting'=>['id'=>(int)$db->lastInsertId(),'student_id'=>$studentId,'student_name'=>$student['name'],'status'=>'active','expires_at'=>$expires,'created_at'=>gmdate('Y-m-d\TH:i:s\Z')],'created'=>true],201);
+            $meetingId=(int)$db->lastInsertId();
+            pushNotifyUser($db,$private,$studentId,'Звонок начался',$user['name'].' приглашает тебя на занятие.','/meeting.html','meeting-'.$meetingId);
+            reply(['meeting'=>['id'=>$meetingId,'student_id'=>$studentId,'student_name'=>$student['name'],'status'=>'active','expires_at'=>$expires,'created_at'=>gmdate('Y-m-d\TH:i:s\Z')],'created'=>true],201);
         }
         if($action==='meeting_redirect'){
             $id=idValue($_GET,'id');
@@ -704,6 +734,7 @@ try {
         if($total>10000)fail('Суммарный балл слишком большой.');
         $groupId=count($studentIds)>1?bin2hex(random_bytes(12)):null;$ids=[];$db->exec('BEGIN IMMEDIATE');
         try{foreach($studentIds as $studentId){run($db,'INSERT INTO homeworks(student_id,created_by,group_id,title,subject,description,due_date,max_score) VALUES(?,?,?,?,?,?,?,?)',[$studentId,$user['id'],$groupId,$title,$subject,$description,$due,$total]);$homeworkId=(int)$db->lastInsertId();$ids[]=$homeworkId;foreach($questions as $q)run($db,'INSERT INTO homework_questions(homework_id,bank_item_id,position,title,prompt,correct_answer,explanation,max_score) VALUES(?,?,?,?,?,?,?,?)',[$homeworkId,$q['bank_item_id'],$q['position'],$q['title'],$q['prompt'],$q['correct_answer'],$q['explanation'],$q['max_score']]);}$db->exec('COMMIT');}catch(Throwable $error){$db->exec('ROLLBACK');throw $error;}
+        foreach($studentIds as $index=>$studentId)pushNotifyUser($db,$private,$studentId,'Новое домашнее задание',$title,'/homework.html?id='.$ids[$index],'homework-'.$ids[$index]);
         reply(['id'=>$ids[0],'ids'=>$ids,'count'=>count($ids),'group_id'=>$groupId],201);
     }
     if ($action === 'homework_detail') {
@@ -751,12 +782,13 @@ try {
         foreach($current as $item){$studentId=(int)$item['student_id'];if(isset($selected[$studentId]))continue;$progress=(int)run($db,"SELECT COUNT(*) FROM homework_questions q WHERE q.homework_id=? AND (trim(q.answer_text)<>'' OR trim(q.code_text)<>'' OR EXISTS(SELECT 1 FROM homework_files f WHERE f.question_id=q.id AND f.deleted=0))",[$item['id']])->fetchColumn();if($item['status']!=='assigned'||$progress>0)$blocked[]=$item['student_name'];}
         if($blocked)fail('Нельзя снять работу: '.implode(', ',$blocked).' уже начал(а) выполнение. Ответы и файлы сохранены.',409);
         $templateQuestions=run($db,'SELECT bank_item_id,position,title,prompt,correct_answer,explanation,max_score FROM homework_questions WHERE homework_id=? ORDER BY position',[$id])->fetchAll();if(!$templateQuestions)fail('В домашней работе нет заданий.',409);
-        $groupId=count($studentIds)>1?($source['group_id']?:bin2hex(random_bytes(12))):null;$ids=[];$added=0;$removed=0;
+        $groupId=count($studentIds)>1?($source['group_id']?:bin2hex(random_bytes(12))):null;$ids=[];$added=0;$removed=0;$addedAssignments=[];
         $db->exec('BEGIN IMMEDIATE');try{
             foreach($current as $item){$studentId=(int)$item['student_id'];if(isset($selected[$studentId])){run($db,"UPDATE homeworks SET group_id=?,updated_at=strftime('%Y-%m-%dT%H:%M:%SZ','now') WHERE id=?",[$groupId,$item['id']]);}else{run($db,"UPDATE homeworks SET deleted_at=strftime('%Y-%m-%dT%H:%M:%SZ','now'),updated_at=strftime('%Y-%m-%dT%H:%M:%SZ','now') WHERE id=?",[$item['id']]);$removed++;}}
-            foreach($studentIds as $studentId){if(isset($currentByStudent[$studentId])){$ids[]=(int)$currentByStudent[$studentId]['id'];continue;}run($db,'INSERT INTO homeworks(student_id,created_by,group_id,title,subject,description,due_date,max_score) VALUES(?,?,?,?,?,?,?,?)',[$studentId,$user['id'],$groupId,$source['title'],$source['subject'],$source['description'],$source['due_date'],$source['max_score']]);$newId=(int)$db->lastInsertId();$ids[]=$newId;$added++;foreach($templateQuestions as $question)run($db,'INSERT INTO homework_questions(homework_id,bank_item_id,position,title,prompt,correct_answer,explanation,max_score) VALUES(?,?,?,?,?,?,?,?)',[$newId,$question['bank_item_id'],$question['position'],$question['title'],$question['prompt'],$question['correct_answer'],$question['explanation'],$question['max_score']]);}
+            foreach($studentIds as $studentId){if(isset($currentByStudent[$studentId])){$ids[]=(int)$currentByStudent[$studentId]['id'];continue;}run($db,'INSERT INTO homeworks(student_id,created_by,group_id,title,subject,description,due_date,max_score) VALUES(?,?,?,?,?,?,?,?)',[$studentId,$user['id'],$groupId,$source['title'],$source['subject'],$source['description'],$source['due_date'],$source['max_score']]);$newId=(int)$db->lastInsertId();$ids[]=$newId;$added++;$addedAssignments[]=[$studentId,$newId];foreach($templateQuestions as $question)run($db,'INSERT INTO homework_questions(homework_id,bank_item_id,position,title,prompt,correct_answer,explanation,max_score) VALUES(?,?,?,?,?,?,?,?)',[$newId,$question['bank_item_id'],$question['position'],$question['title'],$question['prompt'],$question['correct_answer'],$question['explanation'],$question['max_score']]);}
             $db->exec('COMMIT');
         }catch(Throwable $error){if($db->inTransaction())$db->exec('ROLLBACK');throw $error;}
+        foreach($addedAssignments as [$studentId,$newId])pushNotifyUser($db,$private,$studentId,'Новое домашнее задание',$source['title'],'/homework.html?id='.$newId,'homework-'.$newId);
         reply(['ok'=>true,'id'=>$ids[0],'ids'=>$ids,'count'=>count($ids),'group_id'=>$groupId,'added'=>$added,'removed'=>$removed]);
     }
     if ($action === 'homework_save_progress') {
@@ -767,7 +799,9 @@ try {
     }
     if ($action === 'homework_submit') {
         if($user['role']!=='student')fail('Работу отправляет ученик.',403);$id=idValue($data,'id');$homework=run($db,'SELECT * FROM homeworks WHERE id=? AND student_id=? AND created_by=? AND deleted_at IS NULL',[$id,$user['id'],activeTeacherId($db,$user)])->fetch();if(!$homework)fail('Домашняя работа не найдена.',404);if(!in_array($homework['status'],['assigned','revision'],true))fail('Работа уже отправлена.',409);
-        $questions=run($db,'SELECT * FROM homework_questions WHERE homework_id=?',[$id])->fetchAll();$responded=0;$db->exec('BEGIN IMMEDIATE');try{foreach($questions as $q){$hasFile=(int)run($db,'SELECT COUNT(*) FROM homework_files WHERE question_id=? AND deleted=0',[$q['id']])->fetchColumn()>0;if(trim($q['answer_text'])!==''||trim($q['code_text'])!==''||$hasFile)$responded++;$auto=trim($q['answer_text'])===''?null:(normalizedAnswer($q['answer_text'])===normalizedAnswer($q['correct_answer'])?1:0);run($db,"UPDATE homework_questions SET auto_correct=?,awarded_score=NULL,teacher_feedback='' WHERE id=?",[$auto,$q['id']]);}if(!$responded){$db->exec('ROLLBACK');fail('Добавьте хотя бы один ответ, код или файл.');}run($db,"UPDATE homeworks SET status='submitted',submitted_at=strftime('%Y-%m-%dT%H:%M:%SZ','now'),completed_at=NULL,score=NULL,feedback='',updated_at=strftime('%Y-%m-%dT%H:%M:%SZ','now') WHERE id=?",[$id]);$db->exec('COMMIT');}catch(Throwable $error){if($db->inTransaction())$db->exec('ROLLBACK');throw $error;}reply(['ok'=>true,'answered'=>$responded,'total'=>count($questions)]);
+        $questions=run($db,'SELECT * FROM homework_questions WHERE homework_id=?',[$id])->fetchAll();$responded=0;$db->exec('BEGIN IMMEDIATE');try{foreach($questions as $q){$hasFile=(int)run($db,'SELECT COUNT(*) FROM homework_files WHERE question_id=? AND deleted=0',[$q['id']])->fetchColumn()>0;if(trim($q['answer_text'])!==''||trim($q['code_text'])!==''||$hasFile)$responded++;$auto=trim($q['answer_text'])===''?null:(normalizedAnswer($q['answer_text'])===normalizedAnswer($q['correct_answer'])?1:0);run($db,"UPDATE homework_questions SET auto_correct=?,awarded_score=NULL,teacher_feedback='' WHERE id=?",[$auto,$q['id']]);}if(!$responded){$db->exec('ROLLBACK');fail('Добавьте хотя бы один ответ, код или файл.');}run($db,"UPDATE homeworks SET status='submitted',submitted_at=strftime('%Y-%m-%dT%H:%M:%SZ','now'),completed_at=NULL,score=NULL,feedback='',updated_at=strftime('%Y-%m-%dT%H:%M:%SZ','now') WHERE id=?",[$id]);$db->exec('COMMIT');}catch(Throwable $error){if($db->inTransaction())$db->exec('ROLLBACK');throw $error;}
+        pushNotifyUser($db,$private,(int)$homework['created_by'],'Ученик добавил решение',$user['name'].' отправил(а) работу «'.$homework['title'].'».','/homework.html?id='.$id,'homework-submitted-'.$id);
+        reply(['ok'=>true,'answered'=>$responded,'total'=>count($questions)]);
     }
     if ($action === 'homework_review') {
         requireAdmin($user);$id=idValue($data,'id');$homework=run($db,'SELECT * FROM homeworks WHERE id=? AND created_by=? AND deleted_at IS NULL',[$id,$user['id']])->fetch();if(!$homework)fail('Домашняя работа не найдена.',404);if(!in_array($homework['status'],['submitted','revision','done'],true))fail('Ученик ещё не отправил эту работу.',409);$status=textValue($data,'status',20,true);if(!in_array($status,['done','revision'],true))fail('Некорректный результат проверки.');$feedback=textValue($data,'feedback',20000);if($status==='revision'&&$feedback==='')fail('Напишите, что нужно исправить.');$reviews=$data['questions']??[];$questionCount=(int)run($db,'SELECT COUNT(*) FROM homework_questions WHERE homework_id=?',[$id])->fetchColumn();if(!is_array($reviews)||count($reviews)!==$questionCount||count($reviews)>30)fail('Отметьте результат каждого задания.');

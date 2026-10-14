@@ -14,6 +14,7 @@ assets/icon-192.png
 assets/icon-512.png
 assets/kourage-turtle.txt
 assets/meeting.js
+assets/push.js
 assets/python-worker.js
 assets/style.css
 assets/whiteboard-app.css
@@ -27,5 +28,7 @@ homework.html
 index.html
 manifest.webmanifest
 meeting.html
+push.php
+service-worker.js
 whiteboard-app.html
 whiteboard.html

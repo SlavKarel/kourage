@@ -16,6 +16,7 @@ set -euo pipefail
 [[ "$GITHUB_RUN_ID" =~ ^[0-9]+$ && "$GITHUB_RUN_ATTEMPT" =~ ^[0-9]+$ ]] || exit 1
 command -v rsync >/dev/null
 php -l public_html/api.php
+php -l public_html/push.php
 node --check public_html/assets/app.js
 node --check public_html/assets/bank.js
 node --check public_html/assets/builder.js
@@ -23,12 +24,14 @@ node --check public_html/assets/classwork.js
 node --check public_html/assets/editor.js
 node --check public_html/assets/homework.js
 node --check public_html/assets/meeting.js
+node --check public_html/assets/push.js
 node --check public_html/assets/python-worker.js
+node --check public_html/service-worker.js
 node --check public_html/assets/whiteboard.js
 node --check public_html/assets/whiteboard-app.js
 
 # An explicit list prevents unrelated uploaded files or live data being sent.
-expected=$'.htaccess\napi.php\nassets/app.js\nassets/apple-touch-icon.png\nassets/bank.js\nassets/builder.js\nassets/classwork.js\nassets/editor.js\nassets/excalidraw-license.txt\nassets/favicon-32.png\nassets/favicon.svg\nassets/homework.js\nassets/icon-192.png\nassets/icon-512.png\nassets/kourage-turtle.txt\nassets/meeting.js\nassets/python-worker.js\nassets/style.css\nassets/whiteboard-app.css\nassets/whiteboard-app.js\nassets/whiteboard.js\nbank.html\nbuilder.html\nclasswork.html\neditor.html\nhomework.html\nindex.html\nmanifest.webmanifest\nmeeting.html\nwhiteboard-app.html\nwhiteboard.html'
+expected=$'.htaccess\napi.php\nassets/app.js\nassets/apple-touch-icon.png\nassets/bank.js\nassets/builder.js\nassets/classwork.js\nassets/editor.js\nassets/excalidraw-license.txt\nassets/favicon-32.png\nassets/favicon.svg\nassets/homework.js\nassets/icon-192.png\nassets/icon-512.png\nassets/kourage-turtle.txt\nassets/meeting.js\nassets/push.js\nassets/python-worker.js\nassets/style.css\nassets/whiteboard-app.css\nassets/whiteboard-app.js\nassets/whiteboard.js\nbank.html\nbuilder.html\nclasswork.html\neditor.html\nhomework.html\nindex.html\nmanifest.webmanifest\nmeeting.html\npush.php\nservice-worker.js\nwhiteboard-app.html\nwhiteboard.html'
 [[ "$(cat deploy/public-files.txt)" == "$expected" ]] || { echo 'Unexpected deployment file list'; exit 1; }
 [[ -d public_html && ! -L public_html && -d public_html/assets && ! -L public_html/assets ]] || exit 1
 while IFS= read -r item; do
@@ -58,7 +61,7 @@ test -d courage/public_html/assets
 test ! -L courage/public_html/assets
 test -f courage/private/kourage.sqlite
 command -v rsync >/dev/null
-for file in .htaccess api.php index.html bank.html builder.html classwork.html editor.html homework.html meeting.html whiteboard.html whiteboard-app.html assets/app.js assets/apple-touch-icon.png assets/bank.js assets/builder.js assets/classwork.js assets/editor.js assets/excalidraw-license.txt assets/favicon-32.png assets/favicon.svg assets/homework.js assets/icon-192.png assets/icon-512.png assets/kourage-turtle.txt assets/meeting.js assets/python-worker.js assets/style.css assets/whiteboard-app.css assets/whiteboard-app.js assets/whiteboard.js manifest.webmanifest; do
+for file in .htaccess api.php push.php service-worker.js index.html bank.html builder.html classwork.html editor.html homework.html meeting.html whiteboard.html whiteboard-app.html assets/app.js assets/apple-touch-icon.png assets/bank.js assets/builder.js assets/classwork.js assets/editor.js assets/excalidraw-license.txt assets/favicon-32.png assets/favicon.svg assets/homework.js assets/icon-192.png assets/icon-512.png assets/kourage-turtle.txt assets/meeting.js assets/push.js assets/python-worker.js assets/style.css assets/whiteboard-app.css assets/whiteboard-app.js assets/whiteboard.js manifest.webmanifest; do
   test ! -L "courage/public_html/$file"
 done
 test ! -L courage/.code-backups
