@@ -26,7 +26,7 @@ self.onmessage=async event=>{
     pyodide.FS.mkdirTree(workspace);
     const cleanPath=value=>String(value||'').replace(/\\/g,'/').split('/').filter(part=>part&&part!=='.'&&part!=='..').join('/');
     pyodide.FS.writeFile(workspace+'/turtle.py',await turtleSource(),{encoding:'utf8'});
-    for(const file of Array.isArray(event.data.files)?event.data.files:[]){const relative=cleanPath(file.path);if(!relative)continue;const parts=relative.split('/');parts.pop();if(parts.length)pyodide.FS.mkdirTree(workspace+'/'+parts.join('/'));pyodide.FS.writeFile(workspace+'/'+relative,String(file.content||''),{encoding:'utf8'});}
+    for(const file of Array.isArray(event.data.files)?event.data.files:[]){const relative=cleanPath(file.path);if(!relative)continue;const parts=relative.split('/');parts.pop();if(parts.length)pyodide.FS.mkdirTree(workspace+'/'+parts.join('/'));const content=file.content instanceof ArrayBuffer?new Uint8Array(file.content):ArrayBuffer.isView(file.content)?new Uint8Array(file.content.buffer,file.content.byteOffset,file.content.byteLength):String(file.content||'');pyodide.FS.writeFile(workspace+'/'+relative,content,typeof content==='string'?{encoding:'utf8'}:undefined);}
     const mainPath=cleanPath(event.data.filename)||'main.py',mainParts=mainPath.split('/'),mainName=mainParts.pop()||'main.py',mainDirectory=workspace+(mainParts.length?'/'+mainParts.join('/'):'');
     pyodide.FS.mkdirTree(mainDirectory);pyodide.FS.writeFile(mainDirectory+'/'+mainName,String(event.data.code||''),{encoding:'utf8'});pyodide.FS.chdir(mainDirectory);
     pyodide.runPython("import sys; sys.modules.pop('turtle', None)");
