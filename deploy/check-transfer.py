@@ -10,7 +10,7 @@ assert files == [
     'assets/bank.js', 'assets/builder.js', 'assets/classwork.js', 'assets/editor.js',
     'assets/excalidraw-license.txt', 'assets/favicon-32.png', 'assets/favicon.svg', 'assets/homework.js',
     'assets/icon-192.png', 'assets/icon-512.png', 'assets/kourage-turtle.txt', 'assets/meeting.js',
-    'assets/push.js', 'assets/python-worker.js', 'assets/style.css', 'assets/whiteboard-app.css', 'assets/whiteboard-app.js',
+    'assets/push.js', 'assets/python-worker.js', 'assets/style.css', 'assets/theme.js', 'assets/whiteboard-app.css', 'assets/whiteboard-app.js',
     'assets/whiteboard.js', 'bank.html', 'builder.html', 'classwork.html',
     'editor.html', 'homework.html', 'index.html', 'manifest.webmanifest',
     'meeting.html', 'push.php', 'service-worker.js', 'whiteboard-app.html', 'whiteboard.html',

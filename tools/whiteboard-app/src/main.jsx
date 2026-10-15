@@ -5,6 +5,13 @@ import '@excalidraw/excalidraw/index.css'
 import './style.css'
 
 const boardId = Number(new URLSearchParams(location.search).get('board'))
+const savedTheme = () => {
+  try {
+    const value = localStorage.getItem('kourage-theme')
+    if (value === 'dark' || value === 'light') return value
+  } catch { /* Use the system theme when storage is unavailable. */ }
+  return matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light'
+}
 const palette = [
   { background: '#dbe7ff', stroke: '#2457e8' },
   { background: '#ffe2e2', stroke: '#d9363e' },
@@ -37,6 +44,7 @@ const elementSignature = element => `${element.version || 0}:${element.versionNo
 
 function Board() {
   const [state, setState] = useState({ status: 'loading', elements: [], files: {} })
+  const [theme, setTheme] = useState(savedTheme)
   const excalidrawRef = useRef(null)
   const csrfRef = useRef('')
   const userRef = useRef(null)
@@ -58,6 +66,22 @@ function Board() {
   const pointerButtonRef = useRef('up')
   const selectedRef = useRef({})
   const collaboratorsSignatureRef = useRef('')
+
+  useEffect(() => {
+    document.documentElement.dataset.theme = theme
+    document.documentElement.style.colorScheme = theme
+    const syncTheme = event => {
+      if (event.key === 'kourage-theme') setTheme(savedTheme())
+    }
+    addEventListener('storage', syncTheme)
+    return () => removeEventListener('storage', syncTheme)
+  }, [theme])
+
+  const toggleTheme = () => {
+    const next = theme === 'dark' ? 'light' : 'dark'
+    try { localStorage.setItem('kourage-theme', next) } catch { /* The current page can still switch theme. */ }
+    setTheme(next)
+  }
 
   useEffect(() => {
     if (!Number.isInteger(boardId) || boardId < 1) {
@@ -308,7 +332,9 @@ function Board() {
 
   if (state.status !== 'ready') return <Loading error={state.error} />
   return <div className="whiteboard-shell" aria-label={state.title}>
+    <button className="board-theme-toggle" type="button" onClick={toggleTheme} title={theme === 'dark' ? 'Светлая тема' : 'Тёмная тема'} aria-label={theme === 'dark' ? 'Включить светлую тему' : 'Включить тёмную тему'}>{theme === 'dark' ? '☀' : '☾'}</button>
     <Excalidraw
+      theme={theme}
       initialData={{ elements: state.elements, files: state.files, appState: { viewBackgroundColor: '#ffffff' } }}
       excalidrawAPI={apiObject => { excalidrawRef.current = apiObject }}
       onChange={handleChange}

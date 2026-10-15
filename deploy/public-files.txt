@@ -17,6 +17,7 @@ assets/meeting.js
 assets/push.js
 assets/python-worker.js
 assets/style.css
+assets/theme.js
 assets/whiteboard-app.css
 assets/whiteboard-app.js
 assets/whiteboard.js
