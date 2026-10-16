@@ -103,3 +103,7 @@ html[data-theme=dark] .editor-file-actions button{color:#8898af}
 html[data-theme=dark] .editor-file-actions button:hover{background:#2a3d60;color:#9ab7ff}
 html[data-theme=dark] .editor-file-actions button.danger:hover{background:#42242d;color:#ff9ca8}
 @media(hover:none){.editor-file-actions{opacity:1}}
+
+/* Keep hidden homework review radios from widening the whole page. */
+.review-choice{position:relative}
+.review-choice input{width:1px;height:1px;min-height:0;margin:0}
