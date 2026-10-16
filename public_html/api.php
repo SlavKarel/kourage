@@ -603,6 +603,21 @@ try {
             try{run($db,"INSERT INTO classwork_files(student_id,teacher_id,uploader_id,name,relative_path,storage_name,size,revision,updated_at) VALUES(?,?,?,?,?,?,0,1,strftime('%Y-%m-%dT%H:%M:%SZ','now'))",[$studentId,$editorTeacherId,$user['id'],$name,$relative,$storage]);$id=(int)$db->lastInsertId();}catch(Throwable $error){@unlink($path);throw $error;}
             reply(['id'=>$id,'name'=>$name,'path'=>$relative,'size'=>0,'revision'=>1],201);
         }
+        if($action==='editor_rename'){
+            $id=idValue($data,'id');$name=textValue($data,'name',240,true);$name=str_replace('\\','/',$name);
+            if($name!==basename($name)||$name==='.'||$name==='..'||preg_match('/[\x00-\x1F\x7F]/',$name))fail('Укажите только имя файла, без папки.');
+            $ext=strtolower(pathinfo($name,PATHINFO_EXTENSION));if(!in_array($ext,$editable,true))fail('Это расширение файла не поддерживается редактором.');
+            $record=run($db,'SELECT * FROM classwork_files WHERE id=? AND student_id=? AND teacher_id=? AND deleted=0',[$id,$studentId,$editorTeacherId])->fetch();if(!$record)fail('Файл не найден.',404);
+            $parent=dirname($record['relative_path']);$relative=$parent==='.'?$name:$parent.'/'.$name;if(strlen($relative)>500)fail('Путь файла получился слишком длинным.');
+            if(run($db,'SELECT id FROM classwork_files WHERE student_id=? AND teacher_id=? AND relative_path=? AND deleted=0 AND id<>?',[$studentId,$editorTeacherId,$relative,$id])->fetch())fail('Файл с таким именем уже существует.',409);
+            run($db,"UPDATE classwork_files SET name=?,relative_path=?,uploader_id=?,updated_at=strftime('%Y-%m-%dT%H:%M:%SZ','now') WHERE id=?",[$name,$relative,$user['id'],$id]);
+            reply(['ok'=>true,'id'=>$id,'name'=>$name,'path'=>$relative]);
+        }
+        if($action==='editor_delete'){
+            $id=idValue($data,'id');$record=run($db,'SELECT id FROM classwork_files WHERE id=? AND student_id=? AND teacher_id=? AND deleted=0',[$id,$studentId,$editorTeacherId])->fetch();if(!$record)fail('Файл не найден.',404);
+            $db->exec('BEGIN IMMEDIATE');try{run($db,'UPDATE classwork_files SET deleted=1 WHERE id=?',[$id]);run($db,'UPDATE editor_presence_context SET file_id=NULL,cursor_start=0,cursor_end=0 WHERE student_id=? AND teacher_id=? AND file_id=?',[$studentId,$editorTeacherId,$id]);run($db,"UPDATE editor_runs_context SET status='stopped',updated_at=? WHERE student_id=? AND teacher_id=? AND file_id=? AND status='running'",[time(),$studentId,$editorTeacherId,$id]);$db->exec('COMMIT');}catch(Throwable $error){if($db->inTransaction())$db->exec('ROLLBACK');throw $error;}
+            reply(['ok'=>true]);
+        }
         if($action==='editor_save'){
             $id=idValue($data,'id');$content=$data['content']??null;if(!is_string($content)||strlen($content)>5*1024*1024||!preg_match('//u',$content))fail('Код должен быть текстом не больше 5 МБ.');$expected=filter_var($data['revision']??null,FILTER_VALIDATE_INT);if($expected===false||$expected<1)fail('Некорректная версия файла.');
             $db->exec('BEGIN IMMEDIATE');try{$record=run($db,'SELECT * FROM classwork_files WHERE id=? AND student_id=? AND teacher_id=? AND deleted=0',[$id,$studentId,$editorTeacherId])->fetch();if(!$record){$db->exec('ROLLBACK');fail('Файл не найден.',404);}if((int)$record['revision']!==(int)$expected){$path=$directory.'/'.$record['storage_name'];$current=is_file($path)?file_get_contents($path):false;$db->exec('ROLLBACK');if($current===false)fail('Файл отсутствует на сервере.',404);reply(['error'=>'Файл уже изменён другим участником.','content'=>$current,'revision'=>(int)$record['revision'],'updated_at'=>$record['updated_at']],409);}
