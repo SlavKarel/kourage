@@ -621,7 +621,7 @@ try {
                 $filesChanged=true;
                 run($db,"UPDATE classwork_files SET uploader_id=?,size=?,revision=revision+1,updated_at=strftime('%Y-%m-%dT%H:%M:%SZ','now') WHERE id=?",[$user['id'],strlen($content),$fileId]);
                 run($db,"UPDATE classwork_files SET uploader_id=?,size=0,revision=revision+1,updated_at=strftime('%Y-%m-%dT%H:%M:%SZ','now') WHERE id=?",[$user['id'],$sourceFileId]);
-                run($db,"UPDATE editor_assignments_context SET bank_item_id=NULL,prompt='',correct_answer='',explanation='',updated_at=strftime('%Y-%m-%dT%H:%M:%SZ','now') WHERE student_id=? AND teacher_id=?",[$studentId,$editorTeacherId]);
+                run($db,"UPDATE editor_assignments_context SET bank_item_id=NULL,correct_answer='',explanation='',updated_at=strftime('%Y-%m-%dT%H:%M:%SZ','now') WHERE student_id=? AND teacher_id=?",[$studentId,$editorTeacherId]);
                 $revision=(int)$expected+1;$sourceRevision=(int)$sourceExpected+1;
                 $db->exec('COMMIT');
             }catch(Throwable $error){
