@@ -573,7 +573,7 @@ try {
                 if(!$item)fail('Задание банка не найдено.',404);
                 $title=$item['title'];$prompt=$item['prompt'];$answer=$item['correct_answer'];$explanation=$item['explanation'];
             }else{
-                $title=textValue($data,'title',250,true);$prompt=textValue($data,'prompt',30000,true);$answer=textValue($data,'correct_answer',5000);$explanation=textValue($data,'explanation',15000);
+                $title=textValue($data,'title',250);$prompt=textValue($data,'prompt',30000,true);$answer=textValue($data,'correct_answer',5000);$explanation=textValue($data,'explanation',15000);
             }
             run($db,"INSERT INTO editor_assignments_context(student_id,teacher_id,bank_item_id,title,prompt,correct_answer,explanation) VALUES(?,?,?,?,?,?,?) ON CONFLICT(student_id,teacher_id) DO UPDATE SET bank_item_id=excluded.bank_item_id,title=excluded.title,prompt=excluded.prompt,correct_answer=excluded.correct_answer,explanation=excluded.explanation,updated_at=strftime('%Y-%m-%dT%H:%M:%SZ','now')",[$studentId,$user['id'],$bankItemId,$title,$prompt,$answer,$explanation]);
             reply(['ok'=>true,'assignment'=>editorAssignment($db,$studentId,$editorTeacherId)]);
