@@ -113,3 +113,5 @@ html[data-theme=dark] .editor-file{color:#b7c3d6}
 html[data-theme=dark] .editor-file.active{color:#6f9cff}
 html[data-theme=dark] .editor-file>span{color:#6f97f5}
 html[data-theme=dark] .editor-files-head span{background:#2a374b;color:#eef3fb}
+/* Metadata row in the editor's task-bank picker. */
+.editor-bank-card-meta{display:flex;align-items:center;gap:9px;flex-wrap:wrap}
