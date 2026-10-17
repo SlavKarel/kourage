@@ -422,9 +422,9 @@ try {
         }
         if($action==='meeting_redirect'){
             $id=idValue($_GET,'id');
-            $meeting=$user['role']==='admin'?run($db,"SELECT id FROM meetings WHERE id=? AND teacher_id=? AND status='active' AND expires_at>?",[$id,$user['id'],time()])->fetch():run($db,"SELECT id FROM meetings WHERE id=? AND student_id=? AND status='active' AND expires_at>?",[$id,$user['id'],time()])->fetch();
+            $meeting=$user['role']==='admin'?run($db,"SELECT room_url FROM meetings WHERE id=? AND teacher_id=? AND status='active' AND expires_at>?",[$id,$user['id'],time()])->fetch():run($db,"SELECT room_url FROM meetings WHERE id=? AND student_id=? AND status='active' AND expires_at>? AND host_ready_at IS NOT NULL",[$id,$user['id'],time()])->fetch();
             if(!$meeting)fail('Встреча завершена или недоступна.',404);
-            header('Location: call.html?id='.$id,true,302);exit;
+            header('Location: '.$meeting['room_url'],true,302);exit;
         }
         if($action==='meeting_join'){
             $id=idValue($data,'id');
