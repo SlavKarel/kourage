@@ -581,6 +581,14 @@ try {
         if($action==='editor_assignment_delete'){
             requireAdmin($user);run($db,'DELETE FROM editor_assignments_context WHERE student_id=? AND teacher_id=?',[$studentId,$user['id']]);reply(['ok'=>true]);
         }
+        if($action==='editor_assignment_export'){
+            requireAdmin($user);$fileId=idValue($data,'file_id');$expected=filter_var($data['expected_revision']??null,FILTER_VALIDATE_INT);if($expected===false||$expected<1)fail('Некорректная версия файла.');
+            $code=$data['code']??null;if(!is_string($code)||strlen($code)>5*1024*1024||!preg_match('//u',$code))fail('Код должен быть текстом не больше 5 МБ.');
+            $task=run($db,'SELECT prompt FROM editor_assignments_context WHERE student_id=? AND teacher_id=?',[$studentId,$editorTeacherId])->fetch();if(!$task)fail('Сначала добавьте задание к занятию.',404);
+            $content=rtrim((string)$task['prompt']);$trimmedCode=ltrim($code,"\r\n");if($trimmedCode!=='')$content.="\n\n".$trimmedCode;if(strlen($content)>5*1024*1024)fail('Задание вместе с кодом превышает 5 МБ.',413);
+            $db->exec('BEGIN IMMEDIATE');try{$record=run($db,'SELECT * FROM classwork_files WHERE id=? AND student_id=? AND teacher_id=? AND deleted=0',[$fileId,$studentId,$editorTeacherId])->fetch();if(!$record){$db->exec('ROLLBACK');fail('Файл назначения не найден.',404);}if((int)$record['revision']!==(int)$expected){$db->exec('ROLLBACK');fail('Файл уже изменён другим участником. Откройте выбор файла ещё раз.',409);}$ext=strtolower(pathinfo($record['name'],PATHINFO_EXTENSION));if(!in_array($ext,$editable,true)){$db->exec('ROLLBACK');fail('В этот файл нельзя записать текст.',415);}if(!is_dir($directory)){$db->exec('ROLLBACK');fail('Папка файлов недоступна.',503);}$path=$directory.'/'.$record['storage_name'];$temp=tempnam($directory,'export-');if($temp===false||file_put_contents($temp,$content,LOCK_EX)===false){if($temp)@unlink($temp);$db->exec('ROLLBACK');fail('Не удалось подготовить файл.',503);}chmod($temp,0600);if(!rename($temp,$path)){@unlink($temp);$db->exec('ROLLBACK');fail('Не удалось сохранить файл.',503);}run($db,"UPDATE classwork_files SET uploader_id=?,size=?,revision=revision+1,updated_at=strftime('%Y-%m-%dT%H:%M:%SZ','now') WHERE id=?",[$user['id'],strlen($content),$fileId]);$revision=(int)$expected+1;$db->exec('COMMIT');}catch(Throwable $error){if($db->inTransaction())$db->exec('ROLLBACK');throw $error;}
+            reply(['ok'=>true,'id'=>$fileId,'revision'=>$revision,'size'=>strlen($content)]);
+        }
         if($action==='editor_run_start'){
             $fileId=idValue($data,'file_id');$record=run($db,'SELECT id,name FROM classwork_files WHERE id=? AND student_id=? AND teacher_id=? AND deleted=0',[$fileId,$studentId,$editorTeacherId])->fetch();if(!$record||strtolower(pathinfo($record['name'],PATHINFO_EXTENSION))!=='py')fail('Выберите Python-файл.',400);
             $stdin='';$runId=bin2hex(random_bytes(16));
