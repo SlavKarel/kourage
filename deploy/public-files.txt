@@ -4,6 +4,8 @@ assets/app.js
 assets/apple-touch-icon.png
 assets/bank.js
 assets/builder.js
+assets/call.css
+assets/call.js
 assets/classwork.js
 assets/editor.js
 assets/excalidraw-license.txt
@@ -23,6 +25,7 @@ assets/whiteboard-app.js
 assets/whiteboard.js
 bank.html
 builder.html
+call.html
 classwork.html
 editor.html
 homework.html
