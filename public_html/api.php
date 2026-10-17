@@ -217,6 +217,8 @@ try {
     $db->exec("UPDATE classwork_files SET updated_at=created_at WHERE updated_at IS NULL OR updated_at=''");
     $db->exec('UPDATE classwork_files SET teacher_id=(SELECT teacher_id FROM users WHERE users.id=classwork_files.student_id) WHERE teacher_id IS NULL');
     $db->exec('CREATE INDEX IF NOT EXISTS idx_classwork_teacher_student ON classwork_files(teacher_id,student_id,deleted,relative_path)');
+    $meetingColumns=array_column($db->query('PRAGMA table_info(meetings)')->fetchAll(),'name');
+    if(!in_array('host_ready_at',$meetingColumns,true))$db->exec('ALTER TABLE meetings ADD COLUMN host_ready_at INTEGER');
     $legacyTables=array_column($db->query("SELECT name FROM sqlite_master WHERE type='table' AND name IN ('editor_assignments','editor_presence','editor_runs')")->fetchAll(),'name');
     if(in_array('editor_assignments',$legacyTables,true)&&(int)$db->query('SELECT COUNT(*) FROM editor_assignments_context')->fetchColumn()===0)$db->exec('INSERT OR IGNORE INTO editor_assignments_context(student_id,teacher_id,bank_item_id,title,prompt,correct_answer,explanation,updated_at) SELECT student_id,teacher_id,bank_item_id,title,prompt,correct_answer,explanation,updated_at FROM editor_assignments');
     if(in_array('editor_presence',$legacyTables,true)&&(int)$db->query('SELECT COUNT(*) FROM editor_presence_context')->fetchColumn()===0)$db->exec('INSERT OR IGNORE INTO editor_presence_context(student_id,teacher_id,user_id,file_id,cursor_start,cursor_end,last_seen) SELECT p.student_id,COALESCE(f.teacher_id,u.teacher_id),p.user_id,p.file_id,p.cursor_start,p.cursor_end,p.last_seen FROM editor_presence p JOIN users u ON u.id=p.student_id LEFT JOIN classwork_files f ON f.id=p.file_id WHERE COALESCE(f.teacher_id,u.teacher_id) IS NOT NULL');
@@ -402,35 +404,45 @@ try {
         if($action==='meeting_state'){
             if($user['role']==='admin'){
                 $students=run($db,"SELECT u.id,u.name,u.login,u.active FROM users u JOIN student_teachers st ON st.student_id=u.id WHERE u.role='student' AND st.teacher_id=? AND u.deleted_at IS NULL ORDER BY u.active DESC,u.name",[$user['id']])->fetchAll();
-                $meetings=run($db,"SELECT m.id,m.student_id,m.status,m.expires_at,m.created_at,u.name AS student_name FROM meetings m JOIN users u ON u.id=m.student_id WHERE m.teacher_id=? AND m.status='active' ORDER BY m.created_at DESC",[$user['id']])->fetchAll();
+                $meetings=run($db,"SELECT m.id,m.student_id,m.status,m.expires_at,m.created_at,m.host_ready_at,u.name AS student_name FROM meetings m JOIN users u ON u.id=m.student_id WHERE m.teacher_id=? AND m.status='active' ORDER BY m.created_at DESC",[$user['id']])->fetchAll();
                 reply(['user'=>publicUser($user),'students'=>$students,'meetings'=>$meetings,'configured'=>true,'csrf'=>$_SESSION['csrf']]);
             }
-            $meeting=run($db,"SELECT m.id,m.status,m.expires_at,m.created_at,u.name AS teacher_name FROM meetings m JOIN users u ON u.id=m.teacher_id WHERE m.student_id=? AND m.teacher_id=? AND m.status='active' ORDER BY m.id DESC LIMIT 1",[$user['id'],activeTeacherId($db,$user)])->fetch()?:null;
+            $meeting=run($db,"SELECT m.id,m.status,m.expires_at,m.created_at,m.host_ready_at,u.name AS teacher_name FROM meetings m JOIN users u ON u.id=m.teacher_id WHERE m.student_id=? AND m.teacher_id=? AND m.status='active' AND m.host_ready_at IS NOT NULL ORDER BY m.id DESC LIMIT 1",[$user['id'],activeTeacherId($db,$user)])->fetch()?:null;
             reply(['user'=>publicUser($user),'students'=>[],'meetings'=>$meeting?[$meeting]:[],'configured'=>true,'csrf'=>$_SESSION['csrf']]);
         }
         if($action==='meeting_create'){
             requireAdmin($user);$studentId=idValue($data,'student_id');
             $student=requireOwnedStudent($db,$user,$studentId,true);
-            $existing=run($db,"SELECT id,student_id,status,expires_at,created_at FROM meetings WHERE teacher_id=? AND student_id=? AND status='active' ORDER BY id DESC LIMIT 1",[$user['id'],$studentId])->fetch();if($existing)reply(['meeting'=>$existing,'created'=>false]);
+            $existing=run($db,"SELECT id,student_id,status,expires_at,created_at,host_ready_at FROM meetings WHERE teacher_id=? AND student_id=? AND status='active' ORDER BY id DESC LIMIT 1",[$user['id'],$studentId])->fetch();if($existing)reply(['meeting'=>$existing,'created'=>false]);
             $roomName='Kourage'.bin2hex(random_bytes(16));$expires=time()+6*60*60;
             $roomUrl='https://meet.jit.si/'.rawurlencode($roomName);
             run($db,'INSERT INTO meetings(teacher_id,student_id,room_name,room_url,expires_at) VALUES(?,?,?,?,?)',[$user['id'],$studentId,$roomName,$roomUrl,$expires]);
             $meetingId=(int)$db->lastInsertId();
-            pushNotifyUser($db,$private,$studentId,'Звонок начался',$user['name'].' приглашает тебя на занятие.','/meeting.html','meeting-'.$meetingId);
-            reply(['meeting'=>['id'=>$meetingId,'student_id'=>$studentId,'student_name'=>$student['name'],'status'=>'active','expires_at'=>$expires,'created_at'=>gmdate('Y-m-d\TH:i:s\Z')],'created'=>true],201);
+            reply(['meeting'=>['id'=>$meetingId,'student_id'=>$studentId,'student_name'=>$student['name'],'status'=>'active','expires_at'=>$expires,'created_at'=>gmdate('Y-m-d\TH:i:s\Z'),'host_ready_at'=>null],'created'=>true],201);
         }
         if($action==='meeting_redirect'){
             $id=idValue($_GET,'id');
-            $meeting=$user['role']==='admin'?run($db,"SELECT * FROM meetings WHERE id=? AND teacher_id=? AND status='active' AND expires_at>?",[$id,$user['id'],time()])->fetch():run($db,"SELECT * FROM meetings WHERE id=? AND student_id=? AND status='active' AND expires_at>?",[$id,$user['id'],time()])->fetch();
+            $meeting=$user['role']==='admin'?run($db,"SELECT id FROM meetings WHERE id=? AND teacher_id=? AND status='active' AND expires_at>?",[$id,$user['id'],time()])->fetch():run($db,"SELECT id FROM meetings WHERE id=? AND student_id=? AND status='active' AND expires_at>?",[$id,$user['id'],time()])->fetch();
             if(!$meeting)fail('Встреча завершена или недоступна.',404);
-            header('Location: https://meet.jit.si/'.rawurlencode((string)$meeting['room_name']),true,302);exit;
+            header('Location: call.html?id='.$id,true,302);exit;
         }
         if($action==='meeting_join'){
             $id=idValue($data,'id');
-            $meeting=$user['role']==='admin'?run($db,"SELECT * FROM meetings WHERE id=? AND teacher_id=? AND status='active' AND expires_at>?",[$id,$user['id'],time()])->fetch():run($db,"SELECT * FROM meetings WHERE id=? AND student_id=? AND status='active' AND expires_at>?",[$id,$user['id'],time()])->fetch();
-            if(!$meeting)fail('Встреча завершена или недоступна.',404);$expires=min((int)$meeting['expires_at'],time()+4*60*60);
-            $roomUrl='https://meet.jit.si/'.rawurlencode((string)$meeting['room_name']);
-            reply(['id'=>(int)$meeting['id'],'url'=>$roomUrl,'display_name'=>$user['name'],'expires_at'=>$expires]);
+            $meeting=$user['role']==='admin'
+                ?run($db,"SELECT * FROM meetings WHERE id=? AND teacher_id=? AND status='active' AND expires_at>?",[$id,$user['id'],time()])->fetch()
+                :run($db,"SELECT * FROM meetings WHERE id=? AND student_id=? AND status='active' AND expires_at>? AND host_ready_at IS NOT NULL",[$id,$user['id'],time()])->fetch();
+            if(!$meeting)fail($user['role']==='admin'?'Встреча завершена или недоступна.':'Преподаватель ещё не подключился к звонку.',409);
+            reply(['id'=>(int)$meeting['id'],'room_name'=>$meeting['room_name'],'display_name'=>$user['name'],'is_host'=>$user['role']==='admin','expires_at'=>min((int)$meeting['expires_at'],time()+4*60*60)]);
+        }
+        if($action==='meeting_host_ready'){
+            requireAdmin($user);$id=idValue($data,'id');
+            $meeting=run($db,"SELECT m.*,s.name AS student_name FROM meetings m JOIN users s ON s.id=m.student_id WHERE m.id=? AND m.teacher_id=? AND m.status='active' AND m.expires_at>?",[$id,$user['id'],time()])->fetch();
+            if(!$meeting)fail('Встреча завершена или недоступна.',404);
+            if($meeting['host_ready_at']===null){
+                run($db,'UPDATE meetings SET host_ready_at=? WHERE id=?',[time(),$id]);
+                pushNotifyUser($db,$private,(int)$meeting['student_id'],'Звонок начался',$user['name'].' уже в комнате и приглашает тебя на занятие.','/meeting.html','meeting-'.$id);
+            }
+            reply(['ok'=>true,'host_ready_at'=>(int)($meeting['host_ready_at']??time())]);
         }
         if($action==='meeting_end'){
             requireAdmin($user);$id=idValue($data,'id');$meeting=run($db,"SELECT * FROM meetings WHERE id=? AND teacher_id=? AND status='active'",[$id,$user['id']])->fetch();if(!$meeting)fail('Активная встреча не найдена.',404);
