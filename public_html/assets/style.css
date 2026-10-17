@@ -107,3 +107,9 @@ html[data-theme=dark] .editor-file-actions button.danger:hover{background:#42242
 /* Keep hidden homework review radios from widening the whole page. */
 .review-choice{position:relative}
 .review-choice input{width:1px;height:1px;min-height:0;margin:0}
+
+/* Brighter file names and file count in the dark editor explorer. */
+html[data-theme=dark] .editor-file{color:#b7c3d6}
+html[data-theme=dark] .editor-file.active{color:#6f9cff}
+html[data-theme=dark] .editor-file>span{color:#6f97f5}
+html[data-theme=dark] .editor-files-head span{background:#2a374b;color:#eef3fb}
