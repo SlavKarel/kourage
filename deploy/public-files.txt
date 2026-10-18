@@ -7,6 +7,8 @@ assets/builder.js
 assets/call.css
 assets/call.js
 assets/classwork.js
+assets/doodle-progress.svg
+assets/doodle-tip.svg
 assets/editor.js
 assets/excalidraw-license.txt
 assets/favicon-32.png
