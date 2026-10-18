@@ -130,3 +130,11 @@ html[data-theme=dark] .editor-files-head span{background:#2a374b;color:#eef3fb}
 html[data-theme=dark] .playful-tip::after,html[data-theme=dark] .playful-dashboard .section-top>h2::after,html[data-theme=dark] .playful-dashboard .empty::after{opacity:.96}
 @media(max-width:1180px){.playful-banner::after,.playful-dashboard .section-top>h2::after{display:none}}
 @media(max-width:720px){.playful-tip,.playful-dashboard .empty{margin-top:0}.playful-tip::after,.playful-dashboard .empty::after{display:none}}
+
+/* Схематичные персонажи в онлайн-редакторе. */
+.editor-heading h1{display:flex;align-items:center;gap:14px}
+.editor-heading h1::after{content:"";display:block;width:180px;height:64px;flex:0 0 auto;background:url("doodle-code.svg") center/contain no-repeat;opacity:.82;pointer-events:none}
+.editor-files-head span{position:relative}
+.editor-files-head span::before{content:"";position:absolute;right:calc(100% - 2px);bottom:-2px;width:50px;height:34px;background:url("doodle-file-push.svg") center/contain no-repeat;opacity:.9;pointer-events:none}
+html[data-theme=dark] .editor-heading h1::after,html[data-theme=dark] .editor-files-head span::before{opacity:.96}
+@media(max-width:950px){.editor-heading h1::after,.editor-files-head span::before{display:none}}
