@@ -8,6 +8,8 @@ assets/call.css
 assets/call.js
 assets/classwork.js
 assets/doodle-progress.svg
+assets/doodle-pull.svg
+assets/doodle-peek.svg
 assets/doodle-tip.svg
 assets/editor.js
 assets/excalidraw-license.txt
