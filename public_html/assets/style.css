@@ -115,3 +115,4 @@ html[data-theme=dark] .editor-file>span{color:#6f97f5}
 html[data-theme=dark] .editor-files-head span{background:#2a374b;color:#eef3fb}
 /* Metadata row in the editor's task-bank picker. */
 .editor-bank-card-meta{display:flex;align-items:center;gap:9px;flex-wrap:wrap}
+.meeting-live{color:#25704a}.meeting-card.active-call .meeting-live{color:#d9ffb5}html[data-theme=dark] .meeting-card:not(.active-call) .meeting-live{color:#7fd29c}
