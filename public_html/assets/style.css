@@ -116,25 +116,3 @@ html[data-theme=dark] .editor-files-head span{background:#2a374b;color:#eef3fb}
 /* Metadata row in the editor's task-bank picker. */
 .editor-bank-card-meta{display:flex;align-items:center;gap:9px;flex-wrap:wrap}
 .meeting-live{color:#25704a}.meeting-card.active-call .meeting-live{color:#d9ffb5}html[data-theme=dark] .meeting-card:not(.active-call) .meeting-live{color:#7fd29c}
-
-/* Ненавязчивые иллюстрации на главном экране. */
-.playful-tip{position:relative;margin-top:52px}
-.playful-tip::after{content:"";position:absolute;right:2px;top:-51px;width:110px;height:85px;background:url("doodle-tip.svg?v=2") center/contain no-repeat;opacity:.9;pointer-events:none}
-.playful-banner{position:relative;isolation:isolate;overflow:hidden}
-.playful-banner::after{content:"";position:absolute;z-index:0;right:142px;bottom:-4px;width:190px;height:108px;background:url("doodle-progress.svg") center/contain no-repeat;opacity:.72;pointer-events:none}
-.playful-banner>div{position:relative;z-index:1}
-.playful-dashboard .section-top>h2{display:flex;align-items:center;gap:10px}
-.playful-dashboard .section-top>h2::after{content:"";display:block;width:145px;height:58px;flex:0 0 auto;background:url("doodle-pull.svg") center/contain no-repeat;opacity:.78;pointer-events:none}
-.playful-dashboard .empty{position:relative;margin-top:38px}
-.playful-dashboard .empty::after{content:"";position:absolute;right:28px;top:-42px;width:100px;height:65px;background:url("doodle-peek.svg") center/contain no-repeat;opacity:.86;pointer-events:none}
-html[data-theme=dark] .playful-tip::after,html[data-theme=dark] .playful-dashboard .section-top>h2::after,html[data-theme=dark] .playful-dashboard .empty::after{opacity:.96}
-@media(max-width:1180px){.playful-banner::after,.playful-dashboard .section-top>h2::after{display:none}}
-@media(max-width:720px){.playful-tip,.playful-dashboard .empty{margin-top:0}.playful-tip::after,.playful-dashboard .empty::after{display:none}}
-
-/* Схематичные персонажи в онлайн-редакторе. */
-.editor-heading h1{display:flex;align-items:center;gap:14px}
-.editor-heading h1::after{content:"";display:block;width:180px;height:64px;flex:0 0 auto;background:url("doodle-code.svg") center/contain no-repeat;opacity:.82;pointer-events:none}
-.editor-files-head span{position:relative}
-.editor-files-head span::before{content:"";position:absolute;right:calc(100% - 2px);bottom:-2px;width:50px;height:34px;background:url("doodle-file-push.svg") center/contain no-repeat;opacity:.9;pointer-events:none}
-html[data-theme=dark] .editor-heading h1::after,html[data-theme=dark] .editor-files-head span::before{opacity:.96}
-@media(max-width:950px){.editor-heading h1::after,.editor-files-head span::before{display:none}}
