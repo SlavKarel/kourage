@@ -196,7 +196,7 @@ function Board() {
         } else applyEvents(result.events)
         revisionRef.current = Math.max(revisionRef.current, Number(result.revision) || 0)
       } catch { /* The next poll retries a temporary network failure. */ }
-      pollTimer = window.setTimeout(poll, 650)
+      pollTimer = window.setTimeout(poll, document.hidden ? 5000 : 1200)
     }
 
     const syncPresence = async () => {
@@ -204,7 +204,7 @@ function Board() {
       const user = userRef.current
       if (stoppedRef.current) return
       if (!editor || !user) {
-        presenceTimer = window.setTimeout(syncPresence, 800)
+        presenceTimer = window.setTimeout(syncPresence, document.hidden ? 5000 : 1500)
         return
       }
       const color = palette[Number(user.id) % palette.length]
@@ -241,7 +241,7 @@ function Board() {
           editor.updateScene({ collaborators })
         }
       } catch { /* Presence is ephemeral and restored by the next heartbeat. */ }
-      presenceTimer = window.setTimeout(syncPresence, 800)
+      presenceTimer = window.setTimeout(syncPresence, document.hidden ? 5000 : 1500)
     }
 
     ;(async () => {
@@ -264,7 +264,7 @@ function Board() {
           }
         }
         setState({ status: 'ready', title: initial.board.title, elements, files })
-        pollTimer = window.setTimeout(poll, 650)
+        pollTimer = window.setTimeout(poll, 1200)
         presenceTimer = window.setTimeout(syncPresence, 300)
       } catch (error) {
         setState(current => ({ ...current, status: 'error', error: error.message }))

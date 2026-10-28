@@ -393,8 +393,8 @@ try {
             $presence=$data['presence']??null;if(!is_array($presence))fail('Некорректное присутствие.');
             $encoded=json_encode($presence,JSON_UNESCAPED_UNICODE|JSON_UNESCAPED_SLASHES);if(strlen($encoded)>50000)fail('Слишком много данных присутствия.',413);
             run($db,'INSERT INTO whiteboard_presence(board_id,user_id,presence_json,last_seen) VALUES(?,?,?,?) ON CONFLICT(board_id,user_id) DO UPDATE SET presence_json=excluded.presence_json,last_seen=excluded.last_seen',[$id,$user['id'],$encoded,time()]);
-            run($db,'DELETE FROM whiteboard_presence WHERE board_id=? AND last_seen<?',[$id,time()-5]);
-            $rows=run($db,'SELECT user_id,presence_json FROM whiteboard_presence WHERE board_id=? AND user_id<>? AND last_seen>=?',[$id,$user['id'],time()-5])->fetchAll();
+            run($db,'DELETE FROM whiteboard_presence WHERE board_id=? AND last_seen<?',[$id,time()-10]);
+            $rows=run($db,'SELECT user_id,presence_json FROM whiteboard_presence WHERE board_id=? AND user_id<>? AND last_seen>=?',[$id,$user['id'],time()-10])->fetchAll();
             reply(['peers'=>array_map(static fn(array $row)=>['user_id'=>(int)$row['user_id'],'presence'=>json_decode($row['presence_json'],true)],$rows)]);
         }
         fail('Неизвестное действие.',404);
