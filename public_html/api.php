@@ -437,9 +437,23 @@ try {
             $id=idValue($data,'board_id');$board=$boardForUser($id);if($board['provider']!=='excalidraw')fail('Доска недоступна.',409);
             $presence=$data['presence']??null;if(!is_array($presence))fail('Некорректное присутствие.');
             $encoded=json_encode($presence,JSON_UNESCAPED_UNICODE|JSON_UNESCAPED_SLASHES);if(strlen($encoded)>50000)fail('Слишком много данных присутствия.',413);
-            run($db,'INSERT INTO whiteboard_presence(board_id,user_id,presence_json,last_seen) VALUES(?,?,?,?) ON CONFLICT(board_id,user_id) DO UPDATE SET presence_json=excluded.presence_json,last_seen=excluded.last_seen WHERE whiteboard_presence.presence_json<>excluded.presence_json OR whiteboard_presence.last_seen<excluded.last_seen-3',[$id,$user['id'],$encoded,time()]);
-            $rows=run($db,'SELECT user_id,presence_json FROM whiteboard_presence WHERE board_id=? AND user_id<>? AND last_seen>=?',[$id,$user['id'],time()-10])->fetchAll();
-            reply(['peers'=>array_map(static fn(array $row)=>['user_id'=>(int)$row['user_id'],'presence'=>json_decode($row['presence_json'],true)],$rows)]);
+            $presenceDirectory=$private.'/whiteboard-presence';
+            if(!is_dir($presenceDirectory)&&!@mkdir($presenceDirectory,0700,true)&&!is_dir($presenceDirectory))fail('Не удалось обновить курсор.',503);
+            $ownPath=$presenceDirectory.'/'.$id.'-'.(int)$user['id'].'.json';
+            $ownHandle=@fopen($ownPath,'c');if(!$ownHandle)fail('Не удалось обновить курсор.',503);
+            try{
+                if(!flock($ownHandle,LOCK_EX))fail('Не удалось обновить курсор.',503);
+                $payload=json_encode(['last_seen'=>time(),'user_id'=>(int)$user['id'],'presence'=>$presence],JSON_UNESCAPED_UNICODE|JSON_UNESCAPED_SLASHES);
+                ftruncate($ownHandle,0);rewind($ownHandle);fwrite($ownHandle,$payload);fflush($ownHandle);flock($ownHandle,LOCK_UN);
+            }finally{fclose($ownHandle);}
+            @chmod($ownPath,0600);$peers=[];$cutoff=time()-10;
+            foreach(glob($presenceDirectory.'/'.$id.'-*.json')?:[] as $peerPath){
+                if($peerPath===$ownPath)continue;$peerHandle=@fopen($peerPath,'r');if(!$peerHandle)continue;
+                $peerRaw='';try{if(flock($peerHandle,LOCK_SH)){$peerRaw=stream_get_contents($peerHandle)?:'';flock($peerHandle,LOCK_UN);}}finally{fclose($peerHandle);}
+                $peer=json_decode($peerRaw,true);if(!is_array($peer)||($peer['last_seen']??0)<$cutoff){@unlink($peerPath);continue;}
+                if(is_array($peer['presence']??null))$peers[]=['user_id'=>(int)($peer['user_id']??0),'presence'=>$peer['presence']];
+            }
+            reply(['peers'=>$peers]);
         }
         fail('Неизвестное действие.',404);
     }

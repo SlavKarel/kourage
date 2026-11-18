@@ -68,6 +68,7 @@ function Board() {
   const pointerMovedAtRef = useRef(0)
   const wakePresenceRef = useRef(() => {})
   const presenceSendingRef = useRef(false)
+  const applyingPresenceRef = useRef(false)
   const selectedRef = useRef({})
   const collaboratorsSignatureRef = useRef('')
   const peersActiveUntilRef = useRef(0)
@@ -183,7 +184,7 @@ function Board() {
         window.setTimeout(flush, 700)
       } finally {
         sendingRef.current = false
-        if (queueRef.current.changed.size || queueRef.current.removed.size) sendTimerRef.current = window.setTimeout(flush, 200)
+        if (queueRef.current.changed.size || queueRef.current.removed.size) sendTimerRef.current = window.setTimeout(flush, 350)
       }
     }
     flushRef.current = flush
@@ -202,7 +203,7 @@ function Board() {
         revisionRef.current = Math.max(revisionRef.current, Number(result.revision) || 0)
       } catch { /* The next poll retries a temporary network failure. */ }
       const hasActivePeer = Date.now() < peersActiveUntilRef.current
-      pollTimer = window.setTimeout(poll, document.hidden ? 8000 : (hasActivePeer ? 600 : 1800))
+      pollTimer = window.setTimeout(poll, document.hidden ? 8000 : (hasActivePeer ? 800 : 1800))
     }
 
     const syncPresence = async () => {
@@ -250,12 +251,14 @@ function Board() {
         const signature = JSON.stringify([...collaborators].map(([id, peer]) => [id, peer.pointer, peer.selectedElementIds, peer.button]))
         if (signature !== collaboratorsSignatureRef.current) {
           collaboratorsSignatureRef.current = signature
+          applyingPresenceRef.current = true
           editor.updateScene({ collaborators })
+          requestAnimationFrame(() => { applyingPresenceRef.current = false })
         }
       } catch { /* Presence is ephemeral and restored by the next heartbeat. */ }
       finally { presenceSendingRef.current = false }
       const pointerIsMoving = Date.now() - pointerMovedAtRef.current < 1200
-      presenceTimer = window.setTimeout(syncPresence, document.hidden ? 8000 : (pointerIsMoving ? 120 : 1000))
+      presenceTimer = window.setTimeout(syncPresence, document.hidden ? 8000 : (pointerIsMoving ? 160 : 1000))
     }
     wakePresenceRef.current = () => {
       if (stoppedRef.current || presenceSendingRef.current) return
@@ -339,13 +342,14 @@ function Board() {
     }
     if (changed) {
       clearTimeout(sendTimerRef.current)
-      sendTimerRef.current = window.setTimeout(() => flushRef.current(), 200)
+      sendTimerRef.current = window.setTimeout(() => flushRef.current(), 350)
     }
   }
 
   const handleChange = (elements, appState, files) => {
     if (state.status !== 'ready') return
     selectedRef.current = appState.selectedElementIds || {}
+    if (applyingPresenceRef.current && pointerButtonRef.current !== 'down') return
     activeToolRef.current = appState.activeTool?.type || 'selection'
     pendingChangeRef.current = { elements, files }
     const erasing = activeToolRef.current === 'eraser' && (pointerButtonRef.current === 'down' || appState.cursorButton === 'down')
@@ -354,7 +358,7 @@ function Board() {
       changeTimerRef.current = 0
       return
     }
-    if (!changeTimerRef.current) changeTimerRef.current = window.setTimeout(processPendingChange, 60)
+    if (!changeTimerRef.current) changeTimerRef.current = window.setTimeout(processPendingChange, 120)
   }
 
   if (state.status !== 'ready') return <Loading error={state.error} />
