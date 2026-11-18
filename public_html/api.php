@@ -503,7 +503,7 @@ try {
             header("Content-Disposition: attachment; filename=download; filename*=UTF-8''".rawurlencode($attachment['name']));
             header('Content-Length: '.filesize($path));
             header('Content-Security-Policy: sandbox');
-            session_write_close(); readfile($path); exit;
+            if(session_status()===PHP_SESSION_ACTIVE)session_write_close(); readfile($path); exit;
         }
         if($action==='preview'){
             $path=$directory.'/'.$attachment['storage_name'];$ext=strtolower(pathinfo($attachment['name'],PATHINFO_EXTENSION));
@@ -742,7 +742,7 @@ try {
         $directory=$private.'/classwork_uploads';
         if($action==='classwork_download'){
             $path=$directory.'/'.$fileRecord['storage_name'];if(!is_file($path))fail('Файл отсутствует на сервере.',404);
-            header('Content-Type: application/octet-stream');header("Content-Disposition: attachment; filename=download; filename*=UTF-8''".rawurlencode($fileRecord['name']));header('Content-Length: '.filesize($path));header('Content-Security-Policy: sandbox');session_write_close();readfile($path);exit;
+            header('Content-Type: application/octet-stream');header("Content-Disposition: attachment; filename=download; filename*=UTF-8''".rawurlencode($fileRecord['name']));header('Content-Length: '.filesize($path));header('Content-Security-Policy: sandbox');if(session_status()===PHP_SESSION_ACTIVE)session_write_close();readfile($path);exit;
         }
         if($action==='classwork_preview'){
             $ext=strtolower(pathinfo($fileRecord['name'],PATHINFO_EXTENSION));if(!in_array($ext,$previewable,true))fail('Этот формат можно скачать, но нельзя открыть в просмотрщике.',415);
@@ -792,7 +792,7 @@ try {
                 $imageTypes=['image/png','image/jpeg','image/gif','image/webp'];if(!in_array($record['mime'],$imageTypes,true))fail('Этот файл нельзя показать как изображение.',415);
                 header('Content-Type: '.$record['mime']);header('Content-Disposition: inline');
             }else{header('Content-Type: application/octet-stream');header("Content-Disposition: attachment; filename=download; filename*=UTF-8''".rawurlencode($record['name']));}
-            header('Content-Length: '.filesize($path));header('Content-Security-Policy: sandbox');session_write_close();readfile($path);exit;
+            header('Content-Length: '.filesize($path));header('Content-Security-Policy: sandbox');if(session_status()===PHP_SESSION_ACTIVE)session_write_close();readfile($path);exit;
         }
         requireAdmin($user);$itemId=idValue($data,'bank_item_id');$item=run($db,'SELECT id FROM question_bank WHERE id=? AND teacher_id=? AND deleted_at IS NULL',[$itemId,$user['id']])->fetch();if(!$item)fail('Задание банка не найдено.',404);
         if($action==='bank_file_delete'){$fileId=idValue($data,'id');$changed=run($db,'UPDATE question_bank_files SET deleted=1 WHERE id=? AND bank_item_id=? AND deleted=0',[$fileId,$itemId]);if(!$changed->rowCount())fail('Файл не найден.',404);reply(['ok'=>true]);}
@@ -920,7 +920,7 @@ try {
     }
     if (in_array($action,['homework_file_upload','homework_file_remove','homework_file_download'],true)) {
         $source=$action==='homework_file_download'?$_GET:$data;$questionId=idValue($source,'question_id');$question=run($db,'SELECT q.*,h.student_id,h.created_by,h.status,h.deleted_at FROM homework_questions q JOIN homeworks h ON h.id=q.homework_id WHERE q.id=?',[$questionId])->fetch();if(!$question||$question['deleted_at']!==null||($user['role']==='admin'&&(int)$question['created_by']!==(int)$user['id'])||($user['role']!=='admin'&&(int)$question['student_id']!==(int)$user['id']))fail('Файл не найден.',404);$directory=$private.'/homework_uploads';
-        if($action==='homework_file_download'){$fileId=idValue($_GET,'id');$file=run($db,'SELECT * FROM homework_files WHERE id=? AND question_id=? AND deleted=0',[$fileId,$questionId])->fetch();if(!$file)fail('Файл не найден.',404);$path=$directory.'/'.$file['storage_name'];if(!is_file($path))fail('Файл отсутствует на сервере.',404);header('Content-Type: application/octet-stream');header("Content-Disposition: attachment; filename=download; filename*=UTF-8''".rawurlencode($file['name']));header('Content-Length: '.filesize($path));header('Content-Security-Policy: sandbox');session_write_close();readfile($path);exit;}
+        if($action==='homework_file_download'){$fileId=idValue($_GET,'id');$file=run($db,'SELECT * FROM homework_files WHERE id=? AND question_id=? AND deleted=0',[$fileId,$questionId])->fetch();if(!$file)fail('Файл не найден.',404);$path=$directory.'/'.$file['storage_name'];if(!is_file($path))fail('Файл отсутствует на сервере.',404);header('Content-Type: application/octet-stream');header("Content-Disposition: attachment; filename=download; filename*=UTF-8''".rawurlencode($file['name']));header('Content-Length: '.filesize($path));header('Content-Security-Policy: sandbox');if(session_status()===PHP_SESSION_ACTIVE)session_write_close();readfile($path);exit;}
         if($user['role']!=='student'||!in_array($question['status'],['assigned','revision'],true))fail('Файлы можно менять до отправки работы.',403);
         if($action==='homework_file_remove'){$fileId=idValue($data,'id');$changed=run($db,'UPDATE homework_files SET deleted=1 WHERE id=? AND question_id=? AND deleted=0',[$fileId,$questionId]);if(!$changed->rowCount())fail('Файл не найден.',404);reply(['ok'=>true]);}
         $file=$_FILES['file']??null;if(!$file||!is_array($file)||is_array($file['error']??null)||($file['error']??UPLOAD_ERR_NO_FILE)!==UPLOAD_ERR_OK)fail('Файл не загружен.',413);$name=basename(str_replace('\\','/',(string)$file['name']));if($name===''||strlen($name)>240||preg_match('/[\x00-\x1F\x7F]/',$name)||!preg_match('//u',$name))fail('Некорректное имя файла.');$ext=strtolower(pathinfo($name,PATHINFO_EXTENSION));$allowed=['xlsx','xls','ods','csv','txt','md','py','js','ts','jsx','tsx','html','css','json','xml','yaml','yml','sql','java','c','cpp','h','hpp','cs','go','rs','php','sh','ini','toml'];if(!in_array($ext,$allowed,true))fail('Этот тип файла не поддерживается.');$size=filesize($file['tmp_name']);if($size===false||$size>10*1024*1024)fail('Максимальный размер файла — 10 МБ.',413);if((int)run($db,'SELECT COUNT(*) FROM homework_files WHERE question_id=? AND deleted=0',[$questionId])->fetchColumn()>=5)fail('К одному заданию можно прикрепить не больше 5 файлов.');if(!is_dir($directory)&&!mkdir($directory,0700,true))fail('Не удалось создать папку для файлов.',503);$storage=bin2hex(random_bytes(24)).'.bin';$path=$directory.'/'.$storage;if(!move_uploaded_file($file['tmp_name'],$path))fail('Не удалось сохранить файл.',500);chmod($path,0600);run($db,'INSERT INTO homework_files(question_id,uploader_id,name,storage_name,size) VALUES(?,?,?,?,?)',[$questionId,$user['id'],$name,$storage,$size]);reply(['id'=>(int)$db->lastInsertId(),'name'=>$name,'size'=>$size],201);
