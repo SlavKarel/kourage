@@ -20,6 +20,14 @@ assets/push.js
 assets/python-worker.js
 assets/style.css
 assets/theme.js
+assets/vendor/codemirror/LICENSE
+assets/vendor/codemirror/active-line.min.js
+assets/vendor/codemirror/closebrackets.min.js
+assets/vendor/codemirror/codemirror.min.css
+assets/vendor/codemirror/codemirror.min.js
+assets/vendor/codemirror/comment.min.js
+assets/vendor/codemirror/matchbrackets.min.js
+assets/vendor/codemirror/python.min.js
 assets/whiteboard-app.css
 assets/whiteboard-app.js
 assets/whiteboard.js

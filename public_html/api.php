@@ -1,6 +1,7 @@
 <?php
 declare(strict_types=1);
 require_once __DIR__.'/push.php';
+$requestStarted=microtime(true);
 // PHP 8.1+; PDO SQLite. Keep ../private OUTSIDE the public directory.
 ini_set('display_errors', '0');
 header('Content-Type: application/json; charset=utf-8');
@@ -14,9 +15,14 @@ $rememberLifetime = 180 * 24 * 60 * 60;
 session_name('kourage_session');
 session_set_cookie_params(['lifetime'=>0,'path'=>'/','secure'=>$secure,'httponly'=>true,'samesite'=>'Lax']);
 ini_set('session.use_strict_mode', '1');
-session_start();
+
+const DB_SCHEMA_VERSION = 1;
 
 function reply(array $data, int $status = 200): never {
+    global $requestStarted,$action;
+    $elapsedMs=(microtime(true)-$requestStarted)*1000;
+    header('Server-Timing: app;dur='.number_format($elapsedMs,1,'.',''));
+    if($elapsedMs>=2000)error_log('Kourage slow request: '.($action??'bootstrap').' '.(int)$elapsedMs.'ms status '.$status);
     http_response_code($status);
     echo json_encode($data, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
     exit;
@@ -150,7 +156,15 @@ try {
     $private = dirname(__DIR__).'/private';
     if (!is_dir($private) || !is_writable($private)) fail('Не найдена доступная для записи папка private. Проверьте установку по инструкции.',503);
     $db = new PDO('sqlite:'.$private.'/kourage.sqlite', null, null, [PDO::ATTR_ERRMODE=>PDO::ERRMODE_EXCEPTION,PDO::ATTR_DEFAULT_FETCH_MODE=>PDO::FETCH_ASSOC]);
-    $db->exec('PRAGMA foreign_keys=ON; PRAGMA busy_timeout=5000;');
+    $db->exec('PRAGMA foreign_keys=ON; PRAGMA busy_timeout=5000; PRAGMA synchronous=NORMAL;');
+    $hasSchemaTable=(bool)$db->query("SELECT 1 FROM sqlite_master WHERE type='table' AND name='app_meta'")->fetchColumn();
+    $schemaVersion=$hasSchemaTable?(int)(run($db,"SELECT value FROM app_meta WHERE key='schema_version'")->fetchColumn()?:0):0;
+    if($schemaVersion<DB_SCHEMA_VERSION){
+        $db->exec('BEGIN EXCLUSIVE');
+        try{
+            $db->exec('CREATE TABLE IF NOT EXISTS app_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)');
+            $schemaVersion=(int)(run($db,"SELECT value FROM app_meta WHERE key='schema_version'")->fetchColumn()?:0);
+            if($schemaVersion<DB_SCHEMA_VERSION){
     $db->exec("CREATE TABLE IF NOT EXISTS users (id INTEGER PRIMARY KEY, name TEXT NOT NULL, login TEXT NOT NULL UNIQUE COLLATE NOCASE, password_hash TEXT NOT NULL, role TEXT NOT NULL CHECK(role IN ('admin','student')), teacher_id INTEGER, active INTEGER NOT NULL DEFAULT 1, auth_version INTEGER NOT NULL DEFAULT 1, created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now')));
     CREATE TABLE IF NOT EXISTS student_teachers (student_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE, teacher_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE, subject TEXT NOT NULL DEFAULT 'Информатика', created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now')), PRIMARY KEY(student_id,teacher_id));
     CREATE INDEX IF NOT EXISTS idx_student_teachers_teacher ON student_teachers(teacher_id,student_id);
@@ -227,9 +241,24 @@ try {
     if(!in_array('provider',$whiteboardColumns,true))$db->exec("ALTER TABLE whiteboards ADD COLUMN provider TEXT NOT NULL DEFAULT 'wbo'");
     if(!in_array('sync_revision',$whiteboardColumns,true))$db->exec('ALTER TABLE whiteboards ADD COLUMN sync_revision INTEGER NOT NULL DEFAULT 0');
     $db->exec("DELETE FROM whiteboards WHERE provider IN ('wbo','tldraw')");
+    $db->exec('DELETE FROM editor_presence_context WHERE last_seen < '.(time()-60));
+    $db->exec('DELETE FROM whiteboard_presence WHERE last_seen < '.(time()-60));
+    $db->exec('DELETE FROM whiteboard_changes WHERE revision < COALESCE((SELECT MAX(1,whiteboards.sync_revision-500) FROM whiteboards WHERE whiteboards.id=whiteboard_changes.board_id),1)');
+                run($db,"INSERT INTO app_meta(key,value) VALUES('schema_version',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",[(string)DB_SCHEMA_VERSION]);
+            }
+            $db->exec('COMMIT');
+        }catch(Throwable $migrationError){
+            if($db->inTransaction())$db->exec('ROLLBACK');
+            throw $migrationError;
+        }
+    }
+    $walConfigured=(string)(run($db,"SELECT value FROM app_meta WHERE key='journal_mode'")->fetchColumn()?:'')==='wal';
+    if(!$walConfigured){
+        $journalMode=strtolower((string)$db->query('PRAGMA journal_mode=WAL')->fetchColumn());
+        if($journalMode==='wal')run($db,"INSERT INTO app_meta(key,value) VALUES('journal_mode','wal') ON CONFLICT(key) DO UPDATE SET value=excluded.value");
+        else error_log('Kourage: SQLite WAL mode is unavailable; current mode: '.$journalMode);
+    }
     if (is_file($private.'/kourage.sqlite')) @chmod($private.'/kourage.sqlite',0600);
-    run($db,'DELETE FROM remember_tokens WHERE expires_at < ?',[time()]);
-    $_SESSION['csrf'] ??= bin2hex(random_bytes(24));
     $action = $_GET['action'] ?? 'bootstrap';
     $method = $_SERVER['REQUEST_METHOD'];
     $data = [];
@@ -238,7 +267,6 @@ try {
         $largeEditorActions=['editor_sync','editor_save','editor_run_update'];
         $requestLimit=in_array($action,$largeUploadActions,true)?11*1024*1024:(in_array($action,$largeEditorActions,true)?11*1024*1024:200000);
         if ((int)($_SERVER['CONTENT_LENGTH'] ?? 0) > $requestLimit) fail('Слишком большой запрос.',413);
-        if (!hash_equals($_SESSION['csrf'],$_SERVER['HTTP_X_CSRF_TOKEN'] ?? '')) fail('Обновите страницу и повторите действие.',403);
         if (in_array($action,['upload','classwork_upload','homework_file_upload','bank_file_upload'],true)) { $data = $_POST; } else {
         $jsonLimit=$action==='whiteboard_sync'?11*1024*1024:(in_array($action,$largeEditorActions,true)?11*1024*1024:200000);
         $raw = file_get_contents('php://input',false,null,0,$jsonLimit+1);
@@ -247,16 +275,23 @@ try {
         if (!is_array($data)) fail('Некорректный запрос.');
         }
     } elseif ($method !== 'GET') fail('Метод не поддерживается.',405);
+    session_start();
+    $_SESSION['csrf'] ??= bin2hex(random_bytes(24));
+    if($method==='POST'&&!hash_equals($_SESSION['csrf'],$_SERVER['HTTP_X_CSRF_TOKEN']??''))fail('Обновите страницу и повторите действие.',403);
     $installed = (int)$db->query("SELECT COUNT(*) FROM users WHERE role='admin'")->fetchColumn() > 0;
     $user = isset($_SESSION['uid']) ? run($db,'SELECT * FROM users WHERE id=?',[$_SESSION['uid']])->fetch() : false;
     if ($user && (!(int)$user['active'] || (int)$user['auth_version'] !== (int)($_SESSION['auth_version'] ?? -1) || time() - (int)($_SESSION['last_seen'] ?? 0) > 43200)) {
         unset($_SESSION['uid'],$_SESSION['auth_version']); $user = false;
     }
     if (!$user) $user = restoreRemember($db,$rememberCookie,$secure);
-    if ($user) $_SESSION['last_seen'] = time();
+    if ($user && time()-(int)($_SESSION['last_seen']??0)>=300) $_SESSION['last_seen'] = time();
+    if ($user && $user['role']==='student') activeTeacherId($db,$user);
+    $sessionWriteActions=['login','setup','logout','student_context','change_password'];
+    if(!in_array($action,$sessionWriteActions,true))session_write_close();
     if ($action === 'bootstrap' && $method === 'GET') reply(['installed'=>$installed,'user'=>$user ? publicUser($user) : null,'csrf'=>$_SESSION['csrf']]);
     if ($method !== 'POST' && !in_array($action,['state','download','preview','classwork_state','classwork_download','classwork_preview','editor_state','editor_file','bank_state','bank_file_download','bank_file_view','homework_detail','homework_file_download','meeting_state','meeting_redirect','whiteboard_state','whiteboard_document','push_state'],true)) fail('Используйте POST.',405);
     if ($action === 'login' || $action === 'setup') {
+        run($db,'DELETE FROM remember_tokens WHERE expires_at < ?',[time()]);
         $remember = $data['remember'] ?? false;
         if (!is_bool($remember)) fail('Некорректная настройка запоминания входа.');
         $ipKey = hash('sha256',$action.':'.($_SERVER['REMOTE_ADDR'] ?? 'local'));
@@ -383,7 +418,7 @@ try {
                 foreach($removed as $recordId)run($db,'DELETE FROM whiteboard_records WHERE board_id=? AND record_id=?',[$id,$recordId]);
                 run($db,'INSERT INTO whiteboard_changes(board_id,revision,changed_json,removed_json,actor_id,created_at) VALUES(?,?,?,?,?,?)',[$id,$revision,json_encode(array_values($changed),JSON_UNESCAPED_UNICODE|JSON_UNESCAPED_SLASHES),json_encode(array_values($removed),JSON_UNESCAPED_UNICODE|JSON_UNESCAPED_SLASHES),$user['id'],time()]);
                 run($db,"UPDATE whiteboards SET sync_revision=?,updated_at=strftime('%Y-%m-%dT%H:%M:%SZ','now') WHERE id=?",[$revision,$id]);
-                if($revision%100===0)run($db,'DELETE FROM whiteboard_changes WHERE board_id=? AND revision<?',[$id,max(1,$revision-2000)]);
+                if($revision%100===0)run($db,'DELETE FROM whiteboard_changes WHERE board_id=? AND revision<?',[$id,max(1,$revision-500)]);
                 $events=$boardEvents($id,$since);$db->exec('COMMIT');
             }catch(Throwable $error){if($db->inTransaction())$db->exec('ROLLBACK');throw $error;}
             reply(['revision'=>$revision,'events'=>$events]);
@@ -392,8 +427,7 @@ try {
             $id=idValue($data,'board_id');$board=$boardForUser($id);if($board['provider']!=='excalidraw')fail('Доска недоступна.',409);
             $presence=$data['presence']??null;if(!is_array($presence))fail('Некорректное присутствие.');
             $encoded=json_encode($presence,JSON_UNESCAPED_UNICODE|JSON_UNESCAPED_SLASHES);if(strlen($encoded)>50000)fail('Слишком много данных присутствия.',413);
-            run($db,'INSERT INTO whiteboard_presence(board_id,user_id,presence_json,last_seen) VALUES(?,?,?,?) ON CONFLICT(board_id,user_id) DO UPDATE SET presence_json=excluded.presence_json,last_seen=excluded.last_seen',[$id,$user['id'],$encoded,time()]);
-            run($db,'DELETE FROM whiteboard_presence WHERE board_id=? AND last_seen<?',[$id,time()-10]);
+            run($db,'INSERT INTO whiteboard_presence(board_id,user_id,presence_json,last_seen) VALUES(?,?,?,?) ON CONFLICT(board_id,user_id) DO UPDATE SET presence_json=excluded.presence_json,last_seen=excluded.last_seen WHERE whiteboard_presence.presence_json<>excluded.presence_json OR whiteboard_presence.last_seen<excluded.last_seen-3',[$id,$user['id'],$encoded,time()]);
             $rows=run($db,'SELECT user_id,presence_json FROM whiteboard_presence WHERE board_id=? AND user_id<>? AND last_seen>=?',[$id,$user['id'],time()-10])->fetchAll();
             reply(['peers'=>array_map(static fn(array $row)=>['user_id'=>(int)$row['user_id'],'presence'=>json_decode($row['presence_json'],true)],$rows)]);
         }
@@ -535,7 +569,6 @@ try {
         if($action==='editor_state'){
             $students=$user['role']==='admin'?run($db,"SELECT u.id,u.name,u.login,u.active FROM users u JOIN student_teachers st ON st.student_id=u.id WHERE u.role='student' AND st.teacher_id=? AND u.deleted_at IS NULL ORDER BY u.active DESC,u.name",[$user['id']])->fetchAll():[];
             $files=$studentId?run($db,'SELECT id,student_id,name,relative_path,size,revision,updated_at,created_at FROM classwork_files WHERE student_id=? AND teacher_id=? AND deleted=0 ORDER BY relative_path',[$studentId,$editorTeacherId])->fetchAll():[];
-            run($db,'DELETE FROM editor_presence_context WHERE last_seen < ?',[time()-45]);
             $presence=$studentId?run($db,"SELECT p.user_id,p.file_id,p.cursor_start,p.cursor_end,p.last_seen,u.name,u.role FROM editor_presence_context p JOIN users u ON u.id=p.user_id WHERE p.student_id=? AND p.teacher_id=? AND p.last_seen>=? ORDER BY u.role,u.name",[$studentId,$editorTeacherId,time()-45])->fetchAll():[];
             reply(['user'=>publicUser($user),'students'=>$students,'student_id'=>$studentId,'files'=>$files,'presence'=>$presence,'assignment'=>$studentId?editorAssignment($db,$studentId,$editorTeacherId):null,'csrf'=>$_SESSION['csrf']]);
         }
@@ -550,8 +583,7 @@ try {
             $fileId=isset($data['file_id'])&&$data['file_id']!==null?(int)$data['file_id']:null;if($fileId!==null&&$fileId<1)fail('Некорректный файл.');
             if($fileId&&!run($db,'SELECT id FROM classwork_files WHERE id=? AND student_id=? AND teacher_id=? AND deleted=0',[$fileId,$studentId,$editorTeacherId])->fetch())fail('Файл не найден.',404);
             $cursorStart=max(0,min(5*1024*1024,(int)($data['cursor_start']??0)));$cursorEnd=max($cursorStart,min(5*1024*1024,(int)($data['cursor_end']??$cursorStart)));
-            run($db,'INSERT INTO editor_presence_context(student_id,teacher_id,user_id,file_id,cursor_start,cursor_end,last_seen) VALUES(?,?,?,?,?,?,?) ON CONFLICT(student_id,teacher_id,user_id) DO UPDATE SET file_id=excluded.file_id,cursor_start=excluded.cursor_start,cursor_end=excluded.cursor_end,last_seen=excluded.last_seen',[$studentId,$editorTeacherId,$user['id'],$fileId,$cursorStart,$cursorEnd,time()]);
-            run($db,'DELETE FROM editor_presence_context WHERE last_seen < ?',[time()-45]);
+            run($db,'INSERT INTO editor_presence_context(student_id,teacher_id,user_id,file_id,cursor_start,cursor_end,last_seen) VALUES(?,?,?,?,?,?,?) ON CONFLICT(student_id,teacher_id,user_id) DO UPDATE SET file_id=excluded.file_id,cursor_start=excluded.cursor_start,cursor_end=excluded.cursor_end,last_seen=excluded.last_seen WHERE editor_presence_context.file_id IS NOT excluded.file_id OR editor_presence_context.cursor_start<>excluded.cursor_start OR editor_presence_context.cursor_end<>excluded.cursor_end OR editor_presence_context.last_seen<excluded.last_seen-3',[$studentId,$editorTeacherId,$user['id'],$fileId,$cursorStart,$cursorEnd,time()]);
             $presence=run($db,"SELECT p.user_id,p.file_id,p.cursor_start,p.cursor_end,p.last_seen,u.name,u.role FROM editor_presence_context p JOIN users u ON u.id=p.user_id WHERE p.student_id=? AND p.teacher_id=? AND p.last_seen>=? ORDER BY u.role,u.name",[$studentId,$editorTeacherId,time()-45])->fetchAll();
             reply(['presence'=>$presence]);
         }
@@ -559,14 +591,13 @@ try {
             $fileId=idValue($data,'file_id');$known=max(0,(int)($data['revision']??0));
             $record=run($db,'SELECT * FROM classwork_files WHERE id=? AND student_id=? AND teacher_id=? AND deleted=0',[$fileId,$studentId,$editorTeacherId])->fetch();if(!$record)fail('Файл не найден.',404);
             $cursorStart=max(0,min(5*1024*1024,(int)($data['cursor_start']??0)));$cursorEnd=max(0,min(5*1024*1024,(int)($data['cursor_end']??$cursorStart)));
-            run($db,'INSERT INTO editor_presence_context(student_id,teacher_id,user_id,file_id,cursor_start,cursor_end,last_seen) VALUES(?,?,?,?,?,?,?) ON CONFLICT(student_id,teacher_id,user_id) DO UPDATE SET file_id=excluded.file_id,cursor_start=excluded.cursor_start,cursor_end=excluded.cursor_end,last_seen=excluded.last_seen',[$studentId,$editorTeacherId,$user['id'],$fileId,$cursorStart,$cursorEnd,time()]);
+            run($db,'INSERT INTO editor_presence_context(student_id,teacher_id,user_id,file_id,cursor_start,cursor_end,last_seen) VALUES(?,?,?,?,?,?,?) ON CONFLICT(student_id,teacher_id,user_id) DO UPDATE SET file_id=excluded.file_id,cursor_start=excluded.cursor_start,cursor_end=excluded.cursor_end,last_seen=excluded.last_seen WHERE editor_presence_context.file_id IS NOT excluded.file_id OR editor_presence_context.cursor_start<>excluded.cursor_start OR editor_presence_context.cursor_end<>excluded.cursor_end OR editor_presence_context.last_seen<excluded.last_seen-3',[$studentId,$editorTeacherId,$user['id'],$fileId,$cursorStart,$cursorEnd,time()]);
             if(array_key_exists('content',$data)){
                 $content=$data['content'];if(!is_string($content)||strlen($content)>5*1024*1024||!preg_match('//u',$content))fail('Код должен быть текстом не больше 5 МБ.');$expected=(int)($data['expected_revision']??0);
                 $db->exec('BEGIN IMMEDIATE');try{$record=run($db,'SELECT * FROM classwork_files WHERE id=? AND student_id=? AND teacher_id=? AND deleted=0',[$fileId,$studentId,$editorTeacherId])->fetch();if(!$record){$db->exec('ROLLBACK');fail('Файл не найден.',404);}if((int)$record['revision']!==$expected){$path=$directory.'/'.$record['storage_name'];$remote=is_file($path)?file_get_contents($path):false;$db->exec('ROLLBACK');if($remote===false)fail('Файл отсутствует на сервере.',404);reply(['error'=>'Файл уже изменён другим участником.','content'=>$remote,'revision'=>(int)$record['revision']],409);}
                     $ext=strtolower(pathinfo($record['name'],PATHINFO_EXTENSION));if(!in_array($ext,$editable,true)){$db->exec('ROLLBACK');fail('Этот файл нельзя редактировать в браузере.',415);}$path=$directory.'/'.$record['storage_name'];$temp=tempnam($directory,'edit-');if($temp===false||file_put_contents($temp,$content,LOCK_EX)===false){if($temp)@unlink($temp);$db->exec('ROLLBACK');fail('Не удалось сохранить файл.',503);}chmod($temp,0600);if(!rename($temp,$path)){@unlink($temp);$db->exec('ROLLBACK');fail('Не удалось заменить файл.',503);}run($db,"UPDATE classwork_files SET uploader_id=?,size=?,revision=revision+1,updated_at=strftime('%Y-%m-%dT%H:%M:%SZ','now') WHERE id=?",[$user['id'],strlen($content),$fileId]);$db->exec('COMMIT');$known=$expected+1;
                 }catch(Throwable $error){if($db->inTransaction())$db->exec('ROLLBACK');throw $error;}
             }
-            run($db,'DELETE FROM editor_presence_context WHERE last_seen < ?',[time()-15]);
             $latest=run($db,'SELECT revision,updated_at FROM classwork_files WHERE id=?',[$fileId])->fetch();$payload=['ok'=>true,'revision'=>(int)$latest['revision'],'updated_at'=>$latest['updated_at']];
             if((int)$latest['revision']>$known){$path=$directory.'/'.$record['storage_name'];$remote=is_file($path)?file_get_contents($path):false;if($remote===false)fail('Файл отсутствует на сервере.',404);$payload['content']=$remote;}
             $payload['presence']=run($db,"SELECT p.user_id,p.file_id,p.cursor_start,p.cursor_end,p.last_seen,u.name,u.role FROM editor_presence_context p JOIN users u ON u.id=p.user_id WHERE p.student_id=? AND p.teacher_id=? AND p.last_seen>=? ORDER BY u.role,u.name",[$studentId,$editorTeacherId,time()-15])->fetchAll();
@@ -1129,5 +1160,10 @@ try {
     fail('Действие не найдено.',404);
 } catch (Throwable $error) {
     error_log('Kourage: '.$error->getMessage());
+    $databaseMessage=strtolower($error->getMessage());
+    if(str_contains($databaseMessage,'database is locked')||str_contains($databaseMessage,'database is busy')){
+        header('Retry-After: 1');
+        fail('Сервер занят синхронизацией. Повторите через секунду.',503);
+    }
     fail('Не удалось выполнить запрос. Попробуйте ещё раз. Если ошибка повторяется, проверьте журнал ошибок хостинга.',500);
 }
