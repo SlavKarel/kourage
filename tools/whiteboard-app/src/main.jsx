@@ -1,6 +1,6 @@
 import React, { useEffect, useRef, useState } from 'react'
 import { createRoot } from 'react-dom/client'
-import { Excalidraw } from '@excalidraw/excalidraw'
+import { Excalidraw, viewportCoordsToSceneCoords } from '@excalidraw/excalidraw'
 import '@excalidraw/excalidraw/index.css'
 import './style.css'
 
@@ -42,6 +42,25 @@ const elementRecord = element => ({ id: `element:${element.id}`, kind: 'element'
 const fileRecord = file => ({ id: `file:${file.id}`, kind: 'file', data: file })
 const elementSignature = element => `${element.version || 0}:${element.versionNonce || 0}:${element.isDeleted ? 1 : 0}`
 
+const pointHitsElement = (point, element, padding) => {
+  if (!element || element.isDeleted) return false
+  const width = Math.max(1, Number(element.width) || 0)
+  const height = Math.max(1, Number(element.height) || 0)
+  const x = Number(element.x) || 0
+  const y = Number(element.y) || 0
+  const angle = Number(element.angle) || 0
+  const centerX = x + width / 2
+  const centerY = y + height / 2
+  const dx = point.x - centerX
+  const dy = point.y - centerY
+  const cos = Math.cos(-angle)
+  const sin = Math.sin(-angle)
+  const localX = centerX + dx * cos - dy * sin
+  const localY = centerY + dx * sin + dy * cos
+  return localX >= x - padding && localX <= x + width + padding
+    && localY >= y - padding && localY <= y + height + padding
+}
+
 function Board() {
   const [state, setState] = useState({ status: 'loading', elements: [], files: {} })
   const [theme, setTheme] = useState(savedTheme)
@@ -72,6 +91,8 @@ function Board() {
   const selectedRef = useRef({})
   const collaboratorsSignatureRef = useRef('')
   const peersActiveUntilRef = useRef(0)
+  const shellRef = useRef(null)
+  const canvasPanRef = useRef(null)
 
   useEffect(() => {
     document.documentElement.dataset.theme = theme
@@ -361,8 +382,68 @@ function Board() {
     if (!changeTimerRef.current) changeTimerRef.current = window.setTimeout(processPendingChange, 120)
   }
 
+  const beginCanvasPan = event => {
+    const editor = excalidrawRef.current
+    if (!editor || event.button !== 0 || !(event.target instanceof HTMLCanvasElement)) return
+    const appState = editor.getAppState()
+    if (appState.activeTool?.type !== 'selection' || appState.editingTextElement) return
+    const point = viewportCoordsToSceneCoords(
+      { clientX: event.clientX, clientY: event.clientY },
+      appState,
+    )
+    const padding = 8 / Math.max(0.1, appState.zoom?.value || 1)
+    const clickedElement = editor.getSceneElements().some(element => pointHitsElement(point, element, padding))
+    if (clickedElement) return
+
+    event.preventDefault()
+    event.stopPropagation()
+    event.currentTarget.setPointerCapture?.(event.pointerId)
+    canvasPanRef.current = {
+      pointerId: event.pointerId,
+      startX: event.clientX,
+      startY: event.clientY,
+      scrollX: appState.scrollX,
+      scrollY: appState.scrollY,
+      zoom: Math.max(0.1, appState.zoom?.value || 1),
+    }
+    shellRef.current?.classList.add('board-panning')
+    editor.updateScene({ appState: { selectedElementIds: {} } })
+  }
+
+  const moveCanvasPan = event => {
+    const pan = canvasPanRef.current
+    const editor = excalidrawRef.current
+    if (!pan || !editor || event.pointerId !== pan.pointerId) return
+    event.preventDefault()
+    event.stopPropagation()
+    editor.updateScene({
+      appState: {
+        scrollX: pan.scrollX + (event.clientX - pan.startX) / pan.zoom,
+        scrollY: pan.scrollY + (event.clientY - pan.startY) / pan.zoom,
+      },
+    })
+  }
+
+  const endCanvasPan = event => {
+    const pan = canvasPanRef.current
+    if (!pan || event.pointerId !== pan.pointerId) return
+    event.preventDefault()
+    event.stopPropagation()
+    event.currentTarget.releasePointerCapture?.(event.pointerId)
+    canvasPanRef.current = null
+    shellRef.current?.classList.remove('board-panning')
+  }
+
   if (state.status !== 'ready') return <Loading error={state.error} />
-  return <div className="whiteboard-shell" aria-label={state.title}>
+  return <div
+    ref={shellRef}
+    className="whiteboard-shell"
+    aria-label={state.title}
+    onPointerDownCapture={beginCanvasPan}
+    onPointerMoveCapture={moveCanvasPan}
+    onPointerUpCapture={endCanvasPan}
+    onPointerCancelCapture={endCanvasPan}
+  >
     <button className="board-theme-toggle" type="button" onClick={toggleTheme} title={theme === 'dark' ? 'Светлая тема' : 'Тёмная тема'} aria-label={theme === 'dark' ? 'Включить светлую тему' : 'Включить тёмную тему'}>{theme === 'dark' ? '☀' : '☾'}</button>
     <Excalidraw
       theme={theme}
