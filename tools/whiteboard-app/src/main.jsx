@@ -179,7 +179,7 @@ function Board() {
         window.setTimeout(flush, 700)
       } finally {
         sendingRef.current = false
-        if (queueRef.current.changed.size || queueRef.current.removed.size) sendTimerRef.current = window.setTimeout(flush, 100)
+        if (queueRef.current.changed.size || queueRef.current.removed.size) sendTimerRef.current = window.setTimeout(flush, 200)
       }
     }
     flushRef.current = flush
@@ -198,7 +198,7 @@ function Board() {
         revisionRef.current = Math.max(revisionRef.current, Number(result.revision) || 0)
       } catch { /* The next poll retries a temporary network failure. */ }
       const hasActivePeer = Date.now() < peersActiveUntilRef.current
-      pollTimer = window.setTimeout(poll, document.hidden ? 5000 : (hasActivePeer ? 300 : 1200))
+      pollTimer = window.setTimeout(poll, document.hidden ? 8000 : (hasActivePeer ? 600 : 1800))
     }
 
     const syncPresence = async () => {
@@ -206,7 +206,7 @@ function Board() {
       const user = userRef.current
       if (stoppedRef.current) return
       if (!editor || !user) {
-        presenceTimer = window.setTimeout(syncPresence, document.hidden ? 5000 : 1500)
+        presenceTimer = window.setTimeout(syncPresence, document.hidden ? 8000 : 2500)
         return
       }
       const color = palette[Number(user.id) % palette.length]
@@ -244,7 +244,7 @@ function Board() {
           editor.updateScene({ collaborators })
         }
       } catch { /* Presence is ephemeral and restored by the next heartbeat. */ }
-      presenceTimer = window.setTimeout(syncPresence, document.hidden ? 5000 : 1500)
+      presenceTimer = window.setTimeout(syncPresence, document.hidden ? 8000 : 2500)
     }
 
     ;(async () => {
@@ -322,7 +322,7 @@ function Board() {
     }
     if (changed) {
       clearTimeout(sendTimerRef.current)
-      sendTimerRef.current = window.setTimeout(() => flushRef.current(), 100)
+      sendTimerRef.current = window.setTimeout(() => flushRef.current(), 200)
     }
   }
 

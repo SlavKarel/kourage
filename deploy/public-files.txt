@@ -29,7 +29,9 @@ assets/vendor/codemirror/comment.min.js
 assets/vendor/codemirror/matchbrackets.min.js
 assets/vendor/codemirror/python.min.js
 assets/whiteboard-app.css
+assets/whiteboard-app.css.gz
 assets/whiteboard-app.js
+assets/whiteboard-app.js.gz
 assets/whiteboard.js
 bank.html
 builder.html
