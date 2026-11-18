@@ -1,8 +1,10 @@
 'use strict';
 const $=(selector,root=document)=>root.querySelector(selector);
 const $$=(selector,root=document)=>Array.from(root.querySelectorAll(selector));
-const app=$('#app'),dialog=$('#board-dialog'),params=new URLSearchParams(location.search);
-let csrf='',user=null,students=[],studentId=Number(params.get('student_id'))||0,boards=[],contexts=[],activeTeacherId=0,activeId=0,activeUrl='',toastTimer;
+const app=$('#app'),dialog=$('#board-dialog'),params=new URLSearchParams(location.search),lastStudentKey='kourage-whiteboard-student';
+const savedStudentId=()=>{try{return Number(localStorage.getItem(lastStudentKey))||0;}catch{return 0;}};
+const rememberStudent=id=>{try{id?localStorage.setItem(lastStudentKey,String(id)):localStorage.removeItem(lastStudentKey);}catch{}};
+let csrf='',user=null,students=[],studentId=Number(params.get('student_id'))||savedStudentId(),boards=[],contexts=[],activeTeacherId=0,activeId=0,activeUrl='',toastTimer;
 const esc=value=>String(value??'').replace(/[&<>"']/g,char=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[char]));
 const initials=name=>String(name).split(/\s+/).slice(0,2).map(part=>part[0]||'').join('').toUpperCase();
 const icon=path=>`<svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${path}</svg>`;
@@ -17,6 +19,6 @@ function showForm(board=null){dialog.innerHTML=`<form method="dialog" id="board-
 function editBoard(id){const board=boards.find(item=>Number(item.id)===id);if(board)showForm(board);}
 async function deleteBoard(id){const board=boards.find(item=>Number(item.id)===id);if(!board||!confirm(`Убрать доску «${board.title}» из Kourage?`))return;try{await request('whiteboard_delete',{id});if(activeId===id){activeId=0;activeUrl='';}await load(studentId,true);toast('Доска удалена из кабинета');}catch(error){toast(error.message);}}
 async function openBoard(id){try{const access=await request('whiteboard_open',{id});activeId=id;activeUrl=access.url;render();}catch(error){toast(error.message);}}
-async function load(nextStudentId=studentId,preserve=false){studentId=Number(nextStudentId)||0;const state=await request('whiteboard_state');user=state.user;students=state.students||[];studentId=Number(state.student_id)||0;boards=state.boards||[];contexts=state.contexts||[];activeTeacherId=Number(state.active_teacher_id)||0;history.replaceState(null,'',studentId&&user.role==='admin'?`whiteboard.html?student_id=${studentId}`:'whiteboard.html');if(!preserve||!boards.some(item=>Number(item.id)===activeId)){activeId=0;activeUrl='';}render();if(!activeId&&boards.length)await openBoard(Number(boards[0].id));}
-async function start(){try{await load();}catch(error){app.innerHTML=`<div class="error-page">${brand}<h1>Доски недоступны</h1><p>${esc(error.message)}</p><a class="btn" href="index.html">Вернуться в кабинет</a></div>`;}}
+async function load(nextStudentId=studentId,preserve=false){studentId=Number(nextStudentId)||0;const state=await request('whiteboard_state');user=state.user;students=state.students||[];studentId=Number(state.student_id)||0;boards=state.boards||[];contexts=state.contexts||[];activeTeacherId=Number(state.active_teacher_id)||0;if(user.role==='admin')rememberStudent(studentId);history.replaceState(null,'',studentId&&user.role==='admin'?`whiteboard.html?student_id=${studentId}`:'whiteboard.html');if(!preserve||!boards.some(item=>Number(item.id)===activeId)){activeId=0;activeUrl='';}render();if(!activeId&&boards.length)await openBoard(Number(boards[0].id));}
+async function start(){try{await load();}catch(error){if(!params.get('student_id')&&studentId){rememberStudent(0);studentId=0;try{await load();return;}catch{}}app.innerHTML=`<div class="error-page">${brand}<h1>Доски недоступны</h1><p>${esc(error.message)}</p><a class="btn" href="index.html">Вернуться в кабинет</a></div>`;}}
 start();
