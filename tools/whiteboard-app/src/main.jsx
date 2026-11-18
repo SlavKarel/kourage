@@ -218,12 +218,9 @@ function Board() {
       for (const event of events || []) {
         const revision = Number(event.revision) || 0
         if (revision <= revisionRef.current) continue
-        const isOwnRoundTrip = revision === Number(localRevision) && Number(event.actor_id) === Number(userRef.current?.id)
-        if (!isOwnRoundTrip) {
-          const applied = applyRecords(event.changed, event.removed, false)
-          sceneChanged ||= applied.sceneChanged
-          addedFiles.push(...applied.addedFiles)
-        }
+        const applied = applyRecords(event.changed, event.removed, false)
+        sceneChanged ||= applied.sceneChanged
+        addedFiles.push(...applied.addedFiles)
         revisionRef.current = revision
       }
       renderRemoteScene(sceneChanged, addedFiles)

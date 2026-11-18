@@ -424,9 +424,26 @@ try {
             foreach($removed as $recordId)if(!is_string($recordId)||strlen($recordId)>240)fail('Некорректные данные доски.');
             $db->exec('BEGIN IMMEDIATE');try{
                 $current=(int)run($db,'SELECT sync_revision FROM whiteboards WHERE id=?',[$id])->fetchColumn();$revision=$current+1;
-                foreach($changed as $record)run($db,'INSERT INTO whiteboard_records(board_id,record_id,record_json,updated_revision) VALUES(?,?,?,?) ON CONFLICT(board_id,record_id) DO UPDATE SET record_json=excluded.record_json,updated_revision=excluded.updated_revision',[$id,$record['id'],json_encode($record,JSON_UNESCAPED_UNICODE|JSON_UNESCAPED_SLASHES),$revision]);
+                $acceptedChanged=[];
+                foreach($changed as $record){
+                    $accept=true;
+                    if(str_starts_with($record['id'],'element:')&&isset($record['data'])&&is_array($record['data'])){
+                        $existingJson=run($db,'SELECT record_json FROM whiteboard_records WHERE board_id=? AND record_id=?',[$id,$record['id']])->fetchColumn();
+                        if($existingJson!==false){
+                            $existing=json_decode((string)$existingJson,true);
+                            $incomingVersion=(int)($record['data']['version']??0);
+                            $existingVersion=(int)($existing['data']['version']??0);
+                            $incomingDeleted=!empty($record['data']['isDeleted']);
+                            $existingDeleted=!empty($existing['data']['isDeleted']);
+                            if($incomingVersion<$existingVersion||($incomingVersion===$existingVersion&&$existingDeleted&&!$incomingDeleted))$accept=false;
+                        }
+                    }
+                    if(!$accept)continue;
+                    run($db,'INSERT INTO whiteboard_records(board_id,record_id,record_json,updated_revision) VALUES(?,?,?,?) ON CONFLICT(board_id,record_id) DO UPDATE SET record_json=excluded.record_json,updated_revision=excluded.updated_revision',[$id,$record['id'],json_encode($record,JSON_UNESCAPED_UNICODE|JSON_UNESCAPED_SLASHES),$revision]);
+                    $acceptedChanged[]=$record;
+                }
                 foreach($removed as $recordId)run($db,'DELETE FROM whiteboard_records WHERE board_id=? AND record_id=?',[$id,$recordId]);
-                run($db,'INSERT INTO whiteboard_changes(board_id,revision,changed_json,removed_json,actor_id,created_at) VALUES(?,?,?,?,?,?)',[$id,$revision,json_encode(array_values($changed),JSON_UNESCAPED_UNICODE|JSON_UNESCAPED_SLASHES),json_encode(array_values($removed),JSON_UNESCAPED_UNICODE|JSON_UNESCAPED_SLASHES),$user['id'],time()]);
+                run($db,'INSERT INTO whiteboard_changes(board_id,revision,changed_json,removed_json,actor_id,created_at) VALUES(?,?,?,?,?,?)',[$id,$revision,json_encode(array_values($acceptedChanged),JSON_UNESCAPED_UNICODE|JSON_UNESCAPED_SLASHES),json_encode(array_values($removed),JSON_UNESCAPED_UNICODE|JSON_UNESCAPED_SLASHES),$user['id'],time()]);
                 run($db,"UPDATE whiteboards SET sync_revision=?,updated_at=strftime('%Y-%m-%dT%H:%M:%SZ','now') WHERE id=?",[$revision,$id]);
                 if($revision%100===0)run($db,'DELETE FROM whiteboard_changes WHERE board_id=? AND revision<?',[$id,max(1,$revision-500)]);
                 $events=$boardEvents($id,$since);$db->exec('COMMIT');
