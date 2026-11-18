@@ -66,6 +66,7 @@ function Board() {
   const pointerButtonRef = useRef('up')
   const selectedRef = useRef({})
   const collaboratorsSignatureRef = useRef('')
+  const peersActiveUntilRef = useRef(0)
 
   useEffect(() => {
     document.documentElement.dataset.theme = theme
@@ -175,10 +176,10 @@ function Board() {
       } catch {
         for (const record of changed) queueRef.current.changed.set(record.id, record)
         for (const recordId of removed) queueRef.current.removed.add(recordId)
-        window.setTimeout(flush, 1200)
+        window.setTimeout(flush, 700)
       } finally {
         sendingRef.current = false
-        if (queueRef.current.changed.size || queueRef.current.removed.size) sendTimerRef.current = window.setTimeout(flush, 180)
+        if (queueRef.current.changed.size || queueRef.current.removed.size) sendTimerRef.current = window.setTimeout(flush, 100)
       }
     }
     flushRef.current = flush
@@ -196,7 +197,8 @@ function Board() {
         } else applyEvents(result.events)
         revisionRef.current = Math.max(revisionRef.current, Number(result.revision) || 0)
       } catch { /* The next poll retries a temporary network failure. */ }
-      pollTimer = window.setTimeout(poll, document.hidden ? 5000 : 1200)
+      const hasActivePeer = Date.now() < peersActiveUntilRef.current
+      pollTimer = window.setTimeout(poll, document.hidden ? 5000 : (hasActivePeer ? 300 : 1200))
     }
 
     const syncPresence = async () => {
@@ -235,6 +237,7 @@ function Board() {
             button: presence.button || 'up',
           })
         }
+        if (collaborators.size) peersActiveUntilRef.current = Date.now() + 4000
         const signature = JSON.stringify([...collaborators].map(([id, peer]) => [id, peer.pointer, peer.selectedElementIds, peer.button]))
         if (signature !== collaboratorsSignatureRef.current) {
           collaboratorsSignatureRef.current = signature
@@ -264,8 +267,8 @@ function Board() {
           }
         }
         setState({ status: 'ready', title: initial.board.title, elements, files })
-        pollTimer = window.setTimeout(poll, 1200)
-        presenceTimer = window.setTimeout(syncPresence, 300)
+        pollTimer = window.setTimeout(poll, 400)
+        presenceTimer = window.setTimeout(syncPresence, 150)
       } catch (error) {
         setState(current => ({ ...current, status: 'error', error: error.message }))
       }
@@ -319,7 +322,7 @@ function Board() {
     }
     if (changed) {
       clearTimeout(sendTimerRef.current)
-      sendTimerRef.current = window.setTimeout(() => flushRef.current(), 180)
+      sendTimerRef.current = window.setTimeout(() => flushRef.current(), 100)
     }
   }
 
@@ -327,7 +330,7 @@ function Board() {
     if (state.status !== 'ready') return
     selectedRef.current = appState.selectedElementIds || {}
     pendingChangeRef.current = { elements, files }
-    if (!changeTimerRef.current) changeTimerRef.current = window.setTimeout(processPendingChange, 100)
+    if (!changeTimerRef.current) changeTimerRef.current = window.setTimeout(processPendingChange, 60)
   }
 
   if (state.status !== 'ready') return <Loading error={state.error} />
@@ -344,6 +347,7 @@ function Board() {
         pointerButtonRef.current = payload?.button || 'up'
         if (wasDrawing && pointerButtonRef.current !== 'down') {
           processPendingChange()
+          flushRef.current()
           flushRemoteRef.current()
         }
       }}
