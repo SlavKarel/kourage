@@ -64,6 +64,10 @@ function Board() {
   const knownFilesRef = useRef(new Set())
   const pointerRef = useRef(null)
   const pointerButtonRef = useRef('up')
+  const activeToolRef = useRef('selection')
+  const pointerMovedAtRef = useRef(0)
+  const wakePresenceRef = useRef(() => {})
+  const presenceSendingRef = useRef(false)
   const selectedRef = useRef({})
   const collaboratorsSignatureRef = useRef('')
   const peersActiveUntilRef = useRef(0)
@@ -205,11 +209,16 @@ function Board() {
       const editor = excalidrawRef.current
       const user = userRef.current
       if (stoppedRef.current) return
+      if (presenceSendingRef.current) {
+        presenceTimer = window.setTimeout(syncPresence, 80)
+        return
+      }
       if (!editor || !user) {
         presenceTimer = window.setTimeout(syncPresence, document.hidden ? 8000 : 2500)
         return
       }
       const color = palette[Number(user.id) % palette.length]
+      presenceSendingRef.current = true
       try {
         const result = await api('whiteboard_presence', {
           method: 'POST',
@@ -244,7 +253,14 @@ function Board() {
           editor.updateScene({ collaborators })
         }
       } catch { /* Presence is ephemeral and restored by the next heartbeat. */ }
-      presenceTimer = window.setTimeout(syncPresence, document.hidden ? 8000 : 2500)
+      finally { presenceSendingRef.current = false }
+      const pointerIsMoving = Date.now() - pointerMovedAtRef.current < 1200
+      presenceTimer = window.setTimeout(syncPresence, document.hidden ? 8000 : (pointerIsMoving ? 120 : 1000))
+    }
+    wakePresenceRef.current = () => {
+      if (stoppedRef.current || presenceSendingRef.current) return
+      clearTimeout(presenceTimer)
+      presenceTimer = window.setTimeout(syncPresence, 0)
     }
 
     ;(async () => {
@@ -280,6 +296,7 @@ function Board() {
       clearTimeout(changeTimerRef.current)
       clearTimeout(pollTimer)
       clearTimeout(presenceTimer)
+      wakePresenceRef.current = () => {}
     }
   }, [])
 
@@ -329,7 +346,14 @@ function Board() {
   const handleChange = (elements, appState, files) => {
     if (state.status !== 'ready') return
     selectedRef.current = appState.selectedElementIds || {}
+    activeToolRef.current = appState.activeTool?.type || 'selection'
     pendingChangeRef.current = { elements, files }
+    const erasing = activeToolRef.current === 'eraser' && (pointerButtonRef.current === 'down' || appState.cursorButton === 'down')
+    if (erasing) {
+      clearTimeout(changeTimerRef.current)
+      changeTimerRef.current = 0
+      return
+    }
     if (!changeTimerRef.current) changeTimerRef.current = window.setTimeout(processPendingChange, 60)
   }
 
@@ -343,7 +367,16 @@ function Board() {
       onChange={handleChange}
       onPointerUpdate={payload => {
         const wasDrawing = pointerButtonRef.current === 'down'
-        pointerRef.current = payload?.pointer || null
+        const nextPointer = payload?.pointer || null
+        const previousPointer = pointerRef.current
+        const now = Date.now()
+        const pointerChanged = nextPointer && (!previousPointer || Math.abs(nextPointer.x - previousPointer.x) > 0.5 || Math.abs(nextPointer.y - previousPointer.y) > 0.5)
+        const wasIdle = now - pointerMovedAtRef.current > 500
+        pointerRef.current = nextPointer
+        if (pointerChanged) {
+          pointerMovedAtRef.current = now
+          if (wasIdle) wakePresenceRef.current()
+        }
         pointerButtonRef.current = payload?.button || 'up'
         if (wasDrawing && pointerButtonRef.current !== 'down') {
           processPendingChange()
