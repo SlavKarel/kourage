@@ -87,7 +87,6 @@ function Board() {
   const pointerMovedAtRef = useRef(0)
   const wakePresenceRef = useRef(() => {})
   const presenceSendingRef = useRef(false)
-  const applyingPresenceRef = useRef(false)
   const selectedRef = useRef({})
   const collaboratorsSignatureRef = useRef('')
   const collaboratorsRef = useRef(new Map())
@@ -133,7 +132,6 @@ function Board() {
       const startedAt = performance.now()
       const duration = 145
       let lastPaintAt = 0
-      applyingPresenceRef.current = true
 
       const frame = now => {
         const progress = Math.min(1, (now - startedAt) / duration)
@@ -156,7 +154,6 @@ function Board() {
         if (progress < 1) collaboratorsAnimationRef.current = requestAnimationFrame(frame)
         else {
           collaboratorsAnimationRef.current = 0
-          requestAnimationFrame(() => { applyingPresenceRef.current = false })
         }
       }
       collaboratorsAnimationRef.current = requestAnimationFrame(frame)
@@ -186,6 +183,12 @@ function Board() {
         if (!record || typeof record !== 'object') continue
         if (record.kind === 'element' && record.data?.id) {
           const element = record.data
+          const existing = elementsRef.current.get(element.id)
+          if (existing) {
+            const incomingVersion = Number(element.version) || 0
+            const existingVersion = Number(existing.version) || 0
+            if (incomingVersion < existingVersion || (incomingVersion === existingVersion && existing.isDeleted && !element.isDeleted)) continue
+          }
           elementsRef.current.set(element.id, element)
           signaturesRef.current.set(element.id, elementSignature(element))
           sceneChanged = true
@@ -361,7 +364,6 @@ function Board() {
       clearTimeout(presenceTimer)
       cancelAnimationFrame(collaboratorsAnimationRef.current)
       collaboratorsAnimationRef.current = 0
-      applyingPresenceRef.current = false
       wakePresenceRef.current = () => {}
     }
   }, [])
@@ -412,7 +414,6 @@ function Board() {
   const handleChange = (elements, appState, files) => {
     if (state.status !== 'ready') return
     selectedRef.current = appState.selectedElementIds || {}
-    if (applyingPresenceRef.current && pointerButtonRef.current !== 'down') return
     activeToolRef.current = appState.activeTool?.type || 'selection'
     pendingChangeRef.current = { elements, files }
     const erasing = activeToolRef.current === 'eraser' && (pointerButtonRef.current === 'down' || appState.cursorButton === 'down')
@@ -517,9 +518,10 @@ function Board() {
         }
         pointerButtonRef.current = payload?.button || 'up'
         if (wasDrawing && pointerButtonRef.current !== 'down') {
-          processPendingChange()
-          flushRef.current()
-          flushRemoteRef.current()
+          requestAnimationFrame(() => {
+            processPendingChange()
+            Promise.resolve(flushRef.current()).finally(() => flushRemoteRef.current())
+          })
         }
       }}
       isCollaborating
