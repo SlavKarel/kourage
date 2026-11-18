@@ -997,6 +997,13 @@ try {
         run($db,"INSERT INTO student_teachers(student_id,teacher_id,subject) VALUES(?,?,?) ON CONFLICT(student_id,teacher_id) DO UPDATE SET subject=excluded.subject",[$studentId,$teacherId,$subject]);
         reply(['ok'=>true]);
     }
+    if ($action === 'rename_student') {
+        requireAdmin($user); $id=idValue($data,'id');
+        requirePrimaryStudent($db,$user,$id);
+        $name=textValue($data,'name',160,true);
+        run($db,'UPDATE users SET name=? WHERE id=?',[$name,$id]);
+        reply(['ok'=>true,'name'=>$name]);
+    }
     if ($action === 'create_teacher') {
         requireOwner($db,$user);
         $name = textValue($data,'name',160,true); $login = strtolower(textValue($data,'login',64,true));
