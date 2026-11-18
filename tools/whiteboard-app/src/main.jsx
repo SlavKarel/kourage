@@ -112,6 +112,19 @@ function Board() {
     setTheme(next)
   }
 
+  const leaveFullscreen = async () => {
+    if (document.fullscreenElement) {
+      await document.exitFullscreen()
+      return
+    }
+    if (window.opener && !window.opener.closed) {
+      window.close()
+      return
+    }
+    if (history.length > 1) history.back()
+    else location.href = 'whiteboard.html'
+  }
+
   useEffect(() => {
     if (!Number.isInteger(boardId) || boardId < 1) {
       setState(current => ({ ...current, status: 'error', error: 'Не указана доска.' }))
@@ -498,6 +511,18 @@ function Board() {
     onPointerCancelCapture={endCanvasPan}
     onContextMenuCapture={handleCanvasContextMenu}
   >
+    {window.self === window.top && <button
+      type="button"
+      onClick={leaveFullscreen}
+      title="Выйти из полноэкранного режима"
+      aria-label="Выйти из полноэкранного режима"
+      style={{
+        position: 'fixed', zIndex: 21, top: 12, left: 60, height: 38, padding: '0 14px',
+        border: `1px solid ${theme === 'dark' ? '#3b4659' : '#d9deea'}`, borderRadius: 10,
+        background: theme === 'dark' ? '#1b2638' : '#fff', color: theme === 'dark' ? '#e8edf7' : '#26344d',
+        boxShadow: '0 4px 18px #17213d24', cursor: 'pointer', font: '700 14px system-ui, sans-serif',
+      }}
+    >← Выйти</button>}
     <button className="board-theme-toggle" type="button" onClick={toggleTheme} title={theme === 'dark' ? 'Светлая тема' : 'Тёмная тема'} aria-label={theme === 'dark' ? 'Включить светлую тему' : 'Включить тёмную тему'}>{theme === 'dark' ? '☀' : '☾'}</button>
     <Excalidraw
       theme={theme}
