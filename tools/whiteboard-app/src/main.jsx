@@ -90,6 +90,8 @@ function Board() {
   const applyingPresenceRef = useRef(false)
   const selectedRef = useRef({})
   const collaboratorsSignatureRef = useRef('')
+  const collaboratorsRef = useRef(new Map())
+  const collaboratorsAnimationRef = useRef(0)
   const peersActiveUntilRef = useRef(0)
   const shellRef = useRef(null)
   const canvasPanRef = useRef(null)
@@ -118,6 +120,47 @@ function Board() {
     }
     let pollTimer = 0
     let presenceTimer = 0
+
+    const animateCollaborators = targets => {
+      const editor = excalidrawRef.current
+      if (!editor) return
+      cancelAnimationFrame(collaboratorsAnimationRef.current)
+      const starts = new Map()
+      for (const [id, target] of targets) {
+        const current = collaboratorsRef.current.get(id)
+        starts.set(id, current?.pointer ? current.pointer : target.pointer)
+      }
+      const startedAt = performance.now()
+      const duration = 145
+      let lastPaintAt = 0
+      applyingPresenceRef.current = true
+
+      const frame = now => {
+        const progress = Math.min(1, (now - startedAt) / duration)
+        if (progress === 1 || now - lastPaintAt >= 30) {
+          lastPaintAt = now
+          const displayed = new Map()
+          for (const [id, target] of targets) {
+            const start = starts.get(id)
+            const pointer = start && target.pointer
+              ? {
+                  x: start.x + (target.pointer.x - start.x) * progress,
+                  y: start.y + (target.pointer.y - start.y) * progress,
+                }
+              : target.pointer
+            displayed.set(id, { ...target, pointer })
+          }
+          collaboratorsRef.current = displayed
+          editor.updateScene({ collaborators: displayed })
+        }
+        if (progress < 1) collaboratorsAnimationRef.current = requestAnimationFrame(frame)
+        else {
+          collaboratorsAnimationRef.current = 0
+          requestAnimationFrame(() => { applyingPresenceRef.current = false })
+        }
+      }
+      collaboratorsAnimationRef.current = requestAnimationFrame(frame)
+    }
 
     const renderRemoteScene = (sceneChanged, addedFiles) => {
       const editor = excalidrawRef.current
@@ -273,9 +316,7 @@ function Board() {
         const signature = JSON.stringify([...collaborators].map(([id, peer]) => [id, peer.pointer, peer.selectedElementIds, peer.button]))
         if (signature !== collaboratorsSignatureRef.current) {
           collaboratorsSignatureRef.current = signature
-          applyingPresenceRef.current = true
-          editor.updateScene({ collaborators })
-          requestAnimationFrame(() => { applyingPresenceRef.current = false })
+          animateCollaborators(collaborators)
         }
       } catch { /* Presence is ephemeral and restored by the next heartbeat. */ }
       finally { presenceSendingRef.current = false }
@@ -321,6 +362,9 @@ function Board() {
       clearTimeout(changeTimerRef.current)
       clearTimeout(pollTimer)
       clearTimeout(presenceTimer)
+      cancelAnimationFrame(collaboratorsAnimationRef.current)
+      collaboratorsAnimationRef.current = 0
+      applyingPresenceRef.current = false
       wakePresenceRef.current = () => {}
     }
   }, [])
