@@ -93,6 +93,7 @@ function Board() {
   const peersActiveUntilRef = useRef(0)
   const shellRef = useRef(null)
   const canvasPanRef = useRef(null)
+  const suppressContextMenuUntilRef = useRef(0)
 
   useEffect(() => {
     document.documentElement.dataset.theme = theme
@@ -384,7 +385,7 @@ function Board() {
 
   const beginCanvasPan = event => {
     const editor = excalidrawRef.current
-    if (!editor || event.button !== 0 || !(event.target instanceof HTMLCanvasElement)) return
+    if (!editor || event.button !== 2 || !(event.target instanceof HTMLCanvasElement)) return
     const appState = editor.getAppState()
     if (appState.activeTool?.type !== 'selection' || appState.editingTextElement) return
     const point = viewportCoordsToSceneCoords(
@@ -405,6 +406,7 @@ function Board() {
       scrollX: appState.scrollX,
       scrollY: appState.scrollY,
       zoom: Math.max(0.1, appState.zoom?.value || 1),
+      moved: false,
     }
     shellRef.current?.classList.add('board-panning')
     editor.updateScene({ appState: { selectedElementIds: {} } })
@@ -416,6 +418,7 @@ function Board() {
     if (!pan || !editor || event.pointerId !== pan.pointerId) return
     event.preventDefault()
     event.stopPropagation()
+    if (Math.abs(event.clientX - pan.startX) > 3 || Math.abs(event.clientY - pan.startY) > 3) pan.moved = true
     editor.updateScene({
       appState: {
         scrollX: pan.scrollX + (event.clientX - pan.startX) / pan.zoom,
@@ -430,8 +433,16 @@ function Board() {
     event.preventDefault()
     event.stopPropagation()
     event.currentTarget.releasePointerCapture?.(event.pointerId)
+    if (pan.moved) suppressContextMenuUntilRef.current = Date.now() + 500
     canvasPanRef.current = null
     shellRef.current?.classList.remove('board-panning')
+  }
+
+  const handleCanvasContextMenu = event => {
+    if (Date.now() < suppressContextMenuUntilRef.current) {
+      event.preventDefault()
+      event.stopPropagation()
+    }
   }
 
   if (state.status !== 'ready') return <Loading error={state.error} />
@@ -443,6 +454,7 @@ function Board() {
     onPointerMoveCapture={moveCanvasPan}
     onPointerUpCapture={endCanvasPan}
     onPointerCancelCapture={endCanvasPan}
+    onContextMenuCapture={handleCanvasContextMenu}
   >
     <button className="board-theme-toggle" type="button" onClick={toggleTheme} title={theme === 'dark' ? 'Светлая тема' : 'Тёмная тема'} aria-label={theme === 'dark' ? 'Включить светлую тему' : 'Включить тёмную тему'}>{theme === 'dark' ? '☀' : '☾'}</button>
     <Excalidraw
