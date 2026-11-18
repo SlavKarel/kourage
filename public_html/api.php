@@ -18,11 +18,21 @@ ini_set('session.use_strict_mode', '1');
 
 const DB_SCHEMA_VERSION = 1;
 
+function kourageLog(string $message): void {
+    global $private;
+    if(!isset($private)||!is_dir($private)||!is_writable($private))return;
+    $path=$private.'/kourage-runtime.log';
+    $size=is_file($path)?filesize($path):0;
+    if($size!==false&&$size>=2*1024*1024)return;
+    @file_put_contents($path,gmdate('c').' '.$message."\n",FILE_APPEND|LOCK_EX);
+    if(is_file($path))@chmod($path,0600);
+}
+
 function reply(array $data, int $status = 200): never {
     global $requestStarted,$action;
     $elapsedMs=(microtime(true)-$requestStarted)*1000;
     header('Server-Timing: app;dur='.number_format($elapsedMs,1,'.',''));
-    if($elapsedMs>=2000)error_log('Kourage slow request: '.($action??'bootstrap').' '.(int)$elapsedMs.'ms status '.$status);
+    if($elapsedMs>=2000)kourageLog('slow action='.($action??'bootstrap').' duration_ms='.(int)$elapsedMs.' status='.$status);
     http_response_code($status);
     echo json_encode($data, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
     exit;
@@ -256,7 +266,7 @@ try {
     if(!$walConfigured){
         $journalMode=strtolower((string)$db->query('PRAGMA journal_mode=WAL')->fetchColumn());
         if($journalMode==='wal')run($db,"INSERT INTO app_meta(key,value) VALUES('journal_mode','wal') ON CONFLICT(key) DO UPDATE SET value=excluded.value");
-        else error_log('Kourage: SQLite WAL mode is unavailable; current mode: '.$journalMode);
+        else kourageLog('wal_unavailable mode='.$journalMode);
     }
     if (is_file($private.'/kourage.sqlite')) @chmod($private.'/kourage.sqlite',0600);
     $action = $_GET['action'] ?? 'bootstrap';
@@ -1160,6 +1170,7 @@ try {
     fail('Действие не найдено.',404);
 } catch (Throwable $error) {
     error_log('Kourage: '.$error->getMessage());
+    kourageLog('error action='.($action??'bootstrap').' type='.get_class($error).' message='.str_replace(["\r","\n"],' ',$error->getMessage()));
     $databaseMessage=strtolower($error->getMessage());
     if(str_contains($databaseMessage,'database is locked')||str_contains($databaseMessage,'database is busy')){
         header('Retry-After: 1');
