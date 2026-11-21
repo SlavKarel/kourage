@@ -95,6 +95,7 @@ function Board() {
   const shellRef = useRef(null)
   const canvasPanRef = useRef(null)
   const suppressContextMenuUntilRef = useRef(0)
+  const protectingImagesRef = useRef(false)
 
   useEffect(() => {
     document.documentElement.dataset.theme = theme
@@ -428,8 +429,30 @@ function Board() {
     if (state.status !== 'ready') return
     selectedRef.current = appState.selectedElementIds || {}
     activeToolRef.current = appState.activeTool?.type || 'selection'
-    pendingChangeRef.current = { elements, files }
     const erasing = activeToolRef.current === 'eraser' && (pointerButtonRef.current === 'down' || appState.cursorButton === 'down')
+    if (erasing && !protectingImagesRef.current) {
+      let restoredImage = false
+      const protectedElements = elements.map(element => {
+        const previous = elementsRef.current.get(element.id)
+        if (element.type !== 'image' || !element.isDeleted || !previous || previous.isDeleted) return element
+        restoredImage = true
+        return {
+          ...element,
+          isDeleted: false,
+          version: (Number(element.version) || 0) + 1,
+          versionNonce: Math.floor(Math.random() * 2147483647),
+          updated: Date.now(),
+        }
+      })
+      if (restoredImage) {
+        protectingImagesRef.current = true
+        pendingChangeRef.current = { elements: protectedElements, files }
+        excalidrawRef.current?.updateScene({ elements: protectedElements })
+        requestAnimationFrame(() => { protectingImagesRef.current = false })
+        return
+      }
+    }
+    pendingChangeRef.current = { elements, files }
     if (erasing) {
       clearTimeout(changeTimerRef.current)
       changeTimerRef.current = 0
