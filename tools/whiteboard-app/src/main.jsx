@@ -98,6 +98,7 @@ function Board() {
   const protectingImagesRef = useRef(false)
   const applyingRemoteSceneRef = useRef(false)
   const allowImageDeleteUntilRef = useRef(0)
+  const eraserActiveUntilRef = useRef(0)
 
   useEffect(() => {
     document.documentElement.dataset.theme = theme
@@ -437,7 +438,10 @@ function Board() {
     selectedRef.current = appState.selectedElementIds || {}
     activeToolRef.current = appState.activeTool?.type || 'selection'
     const erasing = activeToolRef.current === 'eraser' && (pointerButtonRef.current === 'down' || appState.cursorButton === 'down')
-    const blockImageDeletion = !applyingRemoteSceneRef.current && Date.now() > allowImageDeleteUntilRef.current
+    if (activeToolRef.current === 'eraser') eraserActiveUntilRef.current = Date.now() + 600
+    const blockImageDeletion = !applyingRemoteSceneRef.current
+      && Date.now() < eraserActiveUntilRef.current
+      && Date.now() > allowImageDeleteUntilRef.current
     if (blockImageDeletion && !protectingImagesRef.current) {
       let restoredImage = false
       const protectedElements = elements.map(element => {
@@ -575,6 +579,7 @@ function Board() {
         const nextPointer = payload?.pointer || null
         const previousPointer = pointerRef.current
         const now = Date.now()
+        if (activeToolRef.current === 'eraser') eraserActiveUntilRef.current = now + 600
         const pointerChanged = nextPointer && (!previousPointer || Math.abs(nextPointer.x - previousPointer.x) > 0.5 || Math.abs(nextPointer.y - previousPointer.y) > 0.5)
         const wasIdle = now - pointerMovedAtRef.current > 500
         pointerRef.current = nextPointer
