@@ -158,6 +158,7 @@ function Board() {
             const start = starts.get(id)
             const pointer = start && target.pointer
               ? {
+                  ...target.pointer,
                   x: start.x + (target.pointer.x - start.x) * progress,
                   y: start.y + (target.pointer.y - start.y) * progress,
                 }
