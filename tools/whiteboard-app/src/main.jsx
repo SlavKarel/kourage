@@ -96,6 +96,8 @@ function Board() {
   const canvasPanRef = useRef(null)
   const suppressContextMenuUntilRef = useRef(0)
   const protectingImagesRef = useRef(false)
+  const applyingRemoteSceneRef = useRef(false)
+  const allowImageDeleteUntilRef = useRef(0)
 
   useEffect(() => {
     document.documentElement.dataset.theme = theme
@@ -186,7 +188,11 @@ function Board() {
       const files = [...deferred.files.values()]
       deferredRemoteRef.current = { sceneChanged: false, files: new Map() }
       if (files.length) editor.addFiles(files)
-      if (sceneChanged) editor.updateScene({ elements: [...elementsRef.current.values()] })
+      if (sceneChanged) {
+        applyingRemoteSceneRef.current = true
+        editor.updateScene({ elements: [...elementsRef.current.values()] })
+        requestAnimationFrame(() => { applyingRemoteSceneRef.current = false })
+      }
     }
     flushRemoteRef.current = () => renderRemoteScene(false, [])
 
@@ -430,7 +436,8 @@ function Board() {
     selectedRef.current = appState.selectedElementIds || {}
     activeToolRef.current = appState.activeTool?.type || 'selection'
     const erasing = activeToolRef.current === 'eraser' && (pointerButtonRef.current === 'down' || appState.cursorButton === 'down')
-    if (erasing && !protectingImagesRef.current) {
+    const blockImageDeletion = !applyingRemoteSceneRef.current && Date.now() > allowImageDeleteUntilRef.current
+    if (blockImageDeletion && !protectingImagesRef.current) {
       let restoredImage = false
       const protectedElements = elements.map(element => {
         const previous = elementsRef.current.get(element.id)
@@ -523,6 +530,15 @@ function Board() {
     }
   }
 
+  const authorizeKeyboardImageDelete = event => {
+    if (event.key !== 'Backspace' && event.key !== 'Delete') return
+    const editor = excalidrawRef.current
+    if (!editor) return
+    const selected = editor.getAppState().selectedElementIds || {}
+    const deletingImage = editor.getSceneElements().some(element => element.type === 'image' && !element.isDeleted && selected[element.id])
+    if (deletingImage) allowImageDeleteUntilRef.current = Date.now() + 700
+  }
+
   if (state.status !== 'ready') return <Loading error={state.error} />
   return <div
     ref={shellRef}
@@ -533,6 +549,7 @@ function Board() {
     onPointerUpCapture={endCanvasPan}
     onPointerCancelCapture={endCanvasPan}
     onContextMenuCapture={handleCanvasContextMenu}
+    onKeyDownCapture={authorizeKeyboardImageDelete}
   >
     {window.self === window.top && <button
       type="button"
