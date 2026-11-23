@@ -132,6 +132,8 @@ html[data-theme=dark] .editor-files-head span{background:#2a374b;color:#eef3fb}
 html[data-theme=dark] .early-access-badge{border-color:#6f8d2a;background:linear-gradient(135deg,#d9f47c,#acd34f);color:#1d2911;box-shadow:0 6px 22px #0005}
 .early-access-badge.owner{border-color:#9db6ff;background:linear-gradient(135deg,#dce6ff,#a9c0ff);color:#172852;box-shadow:0 5px 18px #4168d633}.early-access-badge.owner>span{color:#315dcc}.early-access-badge.owner>b{background:#203b83;color:#edf2ff}
 html[data-theme=dark] .early-access-badge.owner{border-color:#4d6caf;background:linear-gradient(135deg,#9cb7ff,#6f91ec);color:#102354}
+.early-access-badge.subscription{border-color:#81cf9e;background:linear-gradient(135deg,#dcf8e6,#a9ebc1);color:#17472d;box-shadow:0 5px 18px #2b9a5630}.early-access-badge.subscription>span{color:#197541}.early-access-badge.subscription>b{background:#19623a;color:#effff5}
+html[data-theme=dark] .early-access-badge.subscription{border-color:#3c8b5c;background:linear-gradient(135deg,#9fe2b7,#66bd88);color:#102d1c}
 @media(max-width:720px){.early-access-badge{min-height:30px;padding:5px 8px;font-size:.66rem}.early-access-badge>b{display:none}.topbar>.early-access-badge{margin-left:auto}}
 
 /* Compact owner CRM. */

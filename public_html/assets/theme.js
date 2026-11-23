@@ -26,18 +26,20 @@
   const mountEarlyAccess=()=>{
     let badge=document.querySelector('[data-early-access]');
     const loggedIn=document.querySelector('.shell,.homework-main');
-    if(teacherRole!=='admin'||teacherAccessStatus==='subscription'||!loggedIn){badge?.remove();return;}
+    if(teacherRole!=='admin'||!loggedIn){badge?.remove();return;}
     if(!badge){
       badge=document.createElement('span');
       badge.className='early-access-badge';
       badge.dataset.earlyAccess='';
     }
-    const owner=teacherAccessStatus==='owner';
+    const owner=teacherAccessStatus==='owner',subscription=teacherAccessStatus==='subscription';
     badge.classList.toggle('owner',owner);
-    badge.innerHTML=owner?'<span>◆</span> Владелец <b>Бессрочно</b>':'<span>●</span> Ранний доступ <b>Бесплатно</b>';
-    badge.title=owner?'Аккаунт владельца с бессрочным доступом':'Сейчас все возможности Kourage доступны преподавателям бесплатно';
+    badge.classList.toggle('subscription',subscription);
+    badge.innerHTML=owner?'<span>◆</span> Владелец <b>Бессрочно</b>':subscription?'<span>✓</span> Подписка <b>Активна</b>':'<span>●</span> Ранний доступ <b>Бесплатно</b>';
+    badge.title=owner?'Аккаунт владельца с бессрочным доступом':subscription?'Подписка Kourage активна':'Сейчас все возможности Kourage доступны преподавателям бесплатно';
     const target=document.querySelector('.topbar .right')||document.querySelector('.topbar')||document.querySelector('.homework-top')||document.body;
-    if(badge.parentElement!==target)target.append(badge);
+    const roleLabel=target.querySelector?.('.role-label');
+    if(roleLabel){if(badge.previousElementSibling!==roleLabel)roleLabel.after(badge);}else if(badge.parentElement!==target)target.append(badge);
     badge.classList.toggle('early-access-floating',target===document.body);
   };
   apply(stored()||system());
