@@ -47,7 +47,7 @@ function textValue(array $data, string $key, int $max, bool $required = false): 
 }
 function passwordValue(array $data, string $key = 'password'): string {
     $value = $data[$key] ?? null;
-    if (!is_string($value) || strlen($value) < 6 || strlen($value) > 72) fail('Пароль должен содержать от 6 до 72 байт (для латиницы — символов).');
+    if (!is_string($value) || strlen($value) < 6 || strlen($value) > 72) fail('Пароль должен содержать от 6 до 72 байт. Для латиницы это от 6 до 72 символов.');
     return $value;
 }
 function run(PDO $db, string $sql, array $params = []): PDOStatement {
@@ -336,7 +336,7 @@ try {
         run($db,'DELETE FROM attempts WHERE until < ?', [time()]);
         run($db,'INSERT INTO attempts(key,count,until) VALUES(?,1,?) ON CONFLICT(key) DO UPDATE SET count=count+1',[$ipKey,time()+900]);
         $login = strtolower(textValue($data,'login',64,true));
-        if (!preg_match('/^[a-z0-9._-]{3,64}$/D',$login)) fail('Логин: 3–64 латинских буквы, цифры, точки, дефисы или подчёркивания.');
+        if (!preg_match('/^[a-z0-9._-]{3,64}$/D',$login)) fail('Логин: от 3 до 64 латинских букв, цифр, точек, дефисов или подчёркиваний.');
         if ($action === 'setup') {
             if ($installed) fail('Первичная настройка уже выполнена.',409);
             $keyPath = $private.'/setup-key.txt';
@@ -374,7 +374,7 @@ try {
 
         $name=textValue($data,'name',160,true);
         $login=strtolower(textValue($data,'login',64,true));
-        if(!preg_match('/^[a-z0-9._-]{3,64}$/D',$login))fail('Логин: 3–64 латинских буквы, цифры, точки, дефисы или подчёркивания.');
+        if(!preg_match('/^[a-z0-9._-]{3,64}$/D',$login))fail('Логин: от 3 до 64 латинских букв, цифр, точек, дефисов или подчёркиваний.');
         $password=passwordValue($data);
         $confirmation=$data['confirmation']??null;
         if(!is_string($confirmation)||!hash_equals($password,$confirmation))fail('Пароли не совпадают.');
@@ -647,7 +647,7 @@ try {
         if(str_starts_with($relative,'/')||str_contains($relative,'//')||basename($relative)!==$name)fail('Некорректный путь файла.');
         foreach(explode('/',$relative) as $segment)if($segment===''||$segment==='.'||$segment==='..')fail('Некорректный путь файла.');
         $size = filesize($file['tmp_name']);
-        if ($size === false || $size > 10*1024*1024) fail('Максимальный размер файла — 10 МБ.',413);
+        if ($size === false || $size > 10*1024*1024) fail('Максимальный размер файла: 10 МБ.',413);
         if (!is_dir($directory) && !mkdir($directory,0700,true)) fail('Не удалось создать папку для файлов.',503);
         $storage = bin2hex(random_bytes(24)).'.bin'; $path = $directory.'/'.$storage;
         $db->exec('BEGIN IMMEDIATE');
@@ -873,7 +873,7 @@ try {
             $file=$_FILES['file']??null;if(!$file||!is_array($file)||is_array($file['error']??null)||($file['error']??UPLOAD_ERR_NO_FILE)!==UPLOAD_ERR_OK)fail('Файл не загружен. Проверьте размер файла.',413);
             $name=basename(str_replace('\\','/',(string)$file['name']));if($name===''||strlen($name)>240||preg_match('/[\x00-\x1F\x7F]/',$name)||!preg_match('//u',$name))fail('Некорректное имя файла.');$ext=strtolower(pathinfo($name,PATHINFO_EXTENSION));if(!in_array($ext,$allowed,true))fail('Этот тип файла не поддерживается.');
             $relative=textValue($data,'path',500,true);$relative=str_replace('\\','/',$relative);if(str_starts_with($relative,'/')||str_contains($relative,'//')||basename($relative)!==$name)fail('Некорректный путь файла.');foreach(explode('/',$relative) as $segment)if($segment===''||$segment==='.'||$segment==='..')fail('Некорректный путь файла.');
-            $size=filesize($file['tmp_name']);if($size===false||$size>10*1024*1024)fail('Максимальный размер файла — 10 МБ.',413);if(!is_dir($directory)&&!mkdir($directory,0700,true))fail('Не удалось создать папку для файлов.',503);$storage=bin2hex(random_bytes(24)).'.bin';$path=$directory.'/'.$storage;
+            $size=filesize($file['tmp_name']);if($size===false||$size>10*1024*1024)fail('Максимальный размер файла: 10 МБ.',413);if(!is_dir($directory)&&!mkdir($directory,0700,true))fail('Не удалось создать папку для файлов.',503);$storage=bin2hex(random_bytes(24)).'.bin';$path=$directory.'/'.$storage;
             $db->exec('BEGIN IMMEDIATE');try{run($db,'UPDATE classwork_files SET deleted=1 WHERE student_id=? AND teacher_id=? AND relative_path=? AND deleted=0',[$studentId,$classworkTeacherId,$relative]);if((int)run($db,'SELECT COUNT(*) FROM classwork_files WHERE student_id=? AND teacher_id=? AND deleted=0',[$studentId,$classworkTeacherId])->fetchColumn()>=200){$db->exec('ROLLBACK');fail('В папке ученика может быть не больше 200 файлов.');}if(!move_uploaded_file($file['tmp_name'],$path))throw new RuntimeException('Cannot move uploaded file');chmod($path,0600);run($db,'INSERT INTO classwork_files(student_id,teacher_id,uploader_id,name,relative_path,storage_name,size) VALUES(?,?,?,?,?,?,?)',[$studentId,$classworkTeacherId,$user['id'],$name,$relative,$storage,$size]);$id=(int)$db->lastInsertId();$db->exec('COMMIT');}catch(Throwable $error){$db->exec('ROLLBACK');if(is_file($path))unlink($path);throw $error;}
             reply(['id'=>$id,'name'=>$name,'path'=>$relative,'size'=>$size],201);
         }
@@ -909,7 +909,7 @@ try {
         $file=$_FILES['file']??null;if(!$file||!is_array($file)||is_array($file['error']??null)||($file['error']??UPLOAD_ERR_NO_FILE)!==UPLOAD_ERR_OK)fail('Файл не загружен.',413);
         $name=basename(str_replace('\\','/',(string)$file['name']));if($name===''||strlen($name)>240||preg_match('/[\x00-\x1F\x7F]/',$name)||!preg_match('//u',$name))fail('Некорректное имя файла.');
         $ext=strtolower(pathinfo($name,PATHINFO_EXTENSION));$types=['png'=>'image/png','jpg'=>'image/jpeg','jpeg'=>'image/jpeg','gif'=>'image/gif','webp'=>'image/webp','txt'=>'text/plain','md'=>'text/markdown','py'=>'text/x-python','csv'=>'text/csv','xlsx'=>'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet','xls'=>'application/vnd.ms-excel','ods'=>'application/vnd.oasis.opendocument.spreadsheet'];if(!isset($types[$ext]))fail('Можно загрузить изображение, TXT, MD, CSV, Python, Excel или ODS.');
-        $size=filesize($file['tmp_name']);if($size===false||$size>10*1024*1024)fail('Максимальный размер файла — 10 МБ.',413);if((int)run($db,'SELECT COUNT(*) FROM question_bank_files WHERE bank_item_id=? AND deleted=0',[$itemId])->fetchColumn()>=8)fail('К заданию можно прикрепить не больше 8 файлов.');
+        $size=filesize($file['tmp_name']);if($size===false||$size>10*1024*1024)fail('Максимальный размер файла: 10 МБ.',413);if((int)run($db,'SELECT COUNT(*) FROM question_bank_files WHERE bank_item_id=? AND deleted=0',[$itemId])->fetchColumn()>=8)fail('К заданию можно прикрепить не больше 8 файлов.');
         $directory=$private.'/bank_uploads';if(!is_dir($directory)&&!mkdir($directory,0700,true))fail('Не удалось создать папку для файлов.',503);$storage=bin2hex(random_bytes(24)).'.bin';$path=$directory.'/'.$storage;if(!move_uploaded_file($file['tmp_name'],$path))fail('Не удалось сохранить файл.',500);chmod($path,0600);run($db,'INSERT INTO question_bank_files(bank_item_id,uploader_id,name,storage_name,size,mime) VALUES(?,?,?,?,?,?)',[$itemId,$user['id'],$name,$storage,$size,$types[$ext]]);reply(['id'=>(int)$db->lastInsertId(),'name'=>$name,'size'=>$size,'mime'=>$types[$ext]],201);
     }
     if ($action === 'bank_save') {
@@ -1033,7 +1033,7 @@ try {
         if($action==='homework_file_download'){$fileId=idValue($_GET,'id');$file=run($db,'SELECT * FROM homework_files WHERE id=? AND question_id=? AND deleted=0',[$fileId,$questionId])->fetch();if(!$file)fail('Файл не найден.',404);$path=$directory.'/'.$file['storage_name'];if(!is_file($path))fail('Файл отсутствует на сервере.',404);header('Content-Type: application/octet-stream');header("Content-Disposition: attachment; filename=download; filename*=UTF-8''".rawurlencode($file['name']));header('Content-Length: '.filesize($path));header('Content-Security-Policy: sandbox');if(session_status()===PHP_SESSION_ACTIVE)session_write_close();readfile($path);exit;}
         if($user['role']!=='student'||!in_array($question['status'],['assigned','revision'],true))fail('Файлы можно менять до отправки работы.',403);
         if($action==='homework_file_remove'){$fileId=idValue($data,'id');$changed=run($db,'UPDATE homework_files SET deleted=1 WHERE id=? AND question_id=? AND deleted=0',[$fileId,$questionId]);if(!$changed->rowCount())fail('Файл не найден.',404);reply(['ok'=>true]);}
-        $file=$_FILES['file']??null;if(!$file||!is_array($file)||is_array($file['error']??null)||($file['error']??UPLOAD_ERR_NO_FILE)!==UPLOAD_ERR_OK)fail('Файл не загружен.',413);$name=basename(str_replace('\\','/',(string)$file['name']));if($name===''||strlen($name)>240||preg_match('/[\x00-\x1F\x7F]/',$name)||!preg_match('//u',$name))fail('Некорректное имя файла.');$ext=strtolower(pathinfo($name,PATHINFO_EXTENSION));$allowed=['xlsx','xls','ods','csv','txt','md','py','js','ts','jsx','tsx','html','css','json','xml','yaml','yml','sql','java','c','cpp','h','hpp','cs','go','rs','php','sh','ini','toml'];if(!in_array($ext,$allowed,true))fail('Этот тип файла не поддерживается.');$size=filesize($file['tmp_name']);if($size===false||$size>10*1024*1024)fail('Максимальный размер файла — 10 МБ.',413);if((int)run($db,'SELECT COUNT(*) FROM homework_files WHERE question_id=? AND deleted=0',[$questionId])->fetchColumn()>=5)fail('К одному заданию можно прикрепить не больше 5 файлов.');if(!is_dir($directory)&&!mkdir($directory,0700,true))fail('Не удалось создать папку для файлов.',503);$storage=bin2hex(random_bytes(24)).'.bin';$path=$directory.'/'.$storage;if(!move_uploaded_file($file['tmp_name'],$path))fail('Не удалось сохранить файл.',500);chmod($path,0600);run($db,'INSERT INTO homework_files(question_id,uploader_id,name,storage_name,size) VALUES(?,?,?,?,?)',[$questionId,$user['id'],$name,$storage,$size]);reply(['id'=>(int)$db->lastInsertId(),'name'=>$name,'size'=>$size],201);
+        $file=$_FILES['file']??null;if(!$file||!is_array($file)||is_array($file['error']??null)||($file['error']??UPLOAD_ERR_NO_FILE)!==UPLOAD_ERR_OK)fail('Файл не загружен.',413);$name=basename(str_replace('\\','/',(string)$file['name']));if($name===''||strlen($name)>240||preg_match('/[\x00-\x1F\x7F]/',$name)||!preg_match('//u',$name))fail('Некорректное имя файла.');$ext=strtolower(pathinfo($name,PATHINFO_EXTENSION));$allowed=['xlsx','xls','ods','csv','txt','md','py','js','ts','jsx','tsx','html','css','json','xml','yaml','yml','sql','java','c','cpp','h','hpp','cs','go','rs','php','sh','ini','toml'];if(!in_array($ext,$allowed,true))fail('Этот тип файла не поддерживается.');$size=filesize($file['tmp_name']);if($size===false||$size>10*1024*1024)fail('Максимальный размер файла: 10 МБ.',413);if((int)run($db,'SELECT COUNT(*) FROM homework_files WHERE question_id=? AND deleted=0',[$questionId])->fetchColumn()>=5)fail('К одному заданию можно прикрепить не больше 5 файлов.');if(!is_dir($directory)&&!mkdir($directory,0700,true))fail('Не удалось создать папку для файлов.',503);$storage=bin2hex(random_bytes(24)).'.bin';$path=$directory.'/'.$storage;if(!move_uploaded_file($file['tmp_name'],$path))fail('Не удалось сохранить файл.',500);chmod($path,0600);run($db,'INSERT INTO homework_files(question_id,uploader_id,name,storage_name,size) VALUES(?,?,?,?,?)',[$questionId,$user['id'],$name,$storage,$size]);reply(['id'=>(int)$db->lastInsertId(),'name'=>$name,'size'=>$size],201);
     }
     if ($action === 'logout') {
         clearRemember($db,$rememberCookie,$secure);
@@ -1133,7 +1133,7 @@ try {
     if ($action === 'create_student') {
         requireAdmin($user);
         $name = textValue($data,'name',160,true); $login = strtolower(textValue($data,'login',64,true));
-        if (!preg_match('/^[a-z0-9._-]{3,64}$/D',$login)) fail('Логин: 3–64 латинских буквы, цифры, точки, дефисы или подчёркивания.');
+        if (!preg_match('/^[a-z0-9._-]{3,64}$/D',$login)) fail('Логин: от 3 до 64 латинских букв, цифр, точек, дефисов или подчёркиваний.');
         if (run($db,'SELECT id FROM users WHERE login=?',[$login])->fetch()) fail('Этот логин уже занят.');
         $password = bin2hex(random_bytes(8));
         $subject=textValue($data,'subject',100)?:'Информатика';
@@ -1158,7 +1158,7 @@ try {
     if ($action === 'create_teacher') {
         requireOwner($db,$user);
         $name = textValue($data,'name',160,true); $login = strtolower(textValue($data,'login',64,true));
-        if (!preg_match('/^[a-z0-9._-]{3,64}$/D',$login)) fail('Логин: 3–64 латинских буквы, цифры, точки, дефисы или подчёркивания.');
+        if (!preg_match('/^[a-z0-9._-]{3,64}$/D',$login)) fail('Логин: от 3 до 64 латинских букв, цифр, точек, дефисов или подчёркиваний.');
         if (run($db,'SELECT id FROM users WHERE login=?',[$login])->fetch()) fail('Этот логин уже занят.');
         $password = bin2hex(random_bytes(8));
         run($db,"INSERT INTO users(name,login,password_hash,role) VALUES(?,?,?,'admin')",[$name,$login,password_hash($password,PASSWORD_DEFAULT)]);
