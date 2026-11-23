@@ -120,3 +120,7 @@ html[data-theme=dark] .editor-files-head span{background:#2a374b;color:#eef3fb}
 /* Metadata row in the editor's task-bank picker. */
 .editor-bank-card-meta{display:flex;align-items:center;gap:9px;flex-wrap:wrap}
 .meeting-live{color:#25704a}.meeting-card.active-call .meeting-live{color:#d9ffb5}html[data-theme=dark] .meeting-card:not(.active-call) .meeting-live{color:#7fd29c}
+
+/* Teacher self-registration on the sign-in screen. */
+.auth-switch{margin-top:22px;padding-top:20px;border-top:1px solid var(--border);color:var(--muted);font-size:.8125rem;text-align:center;line-height:1.6}
+.auth-switch button{padding:0;background:transparent;color:var(--blue);font:inherit;font-weight:600;text-decoration:underline;text-underline-offset:3px}

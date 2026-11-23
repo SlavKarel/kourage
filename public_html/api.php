@@ -296,7 +296,7 @@ try {
     if (!$user) $user = restoreRemember($db,$rememberCookie,$secure);
     if ($user && time()-(int)($_SESSION['last_seen']??0)>=300) $_SESSION['last_seen'] = time();
     if ($user && $user['role']==='student') activeTeacherId($db,$user);
-    $sessionWriteActions=['login','setup','logout','student_context','change_password'];
+    $sessionWriteActions=['login','setup','register','logout','student_context','change_password'];
     if(!in_array($action,$sessionWriteActions,true))session_write_close();
     if ($action === 'bootstrap' && $method === 'GET') reply(['installed'=>$installed,'user'=>$user ? publicUser($user) : null,'csrf'=>$_SESSION['csrf']]);
     if ($method !== 'POST' && !in_array($action,['state','download','preview','classwork_state','classwork_download','classwork_preview','editor_state','editor_file','bank_state','bank_file_download','bank_file_view','homework_detail','homework_file_download','meeting_state','meeting_redirect','whiteboard_state','whiteboard_document','push_state'],true)) fail('Используйте POST.',405);
@@ -335,6 +335,45 @@ try {
         clearRemember($db,$rememberCookie,$secure);
         if ($remember) issueRemember($db,$user,$rememberCookie,$rememberLifetime,$secure);
         reply(['user'=>publicUser($user),'csrf'=>$_SESSION['csrf']]);
+    }
+    if ($action === 'register') {
+        if (!$installed) fail('Сначала нужно завершить первоначальную настройку сайта.',409);
+        $ipKey=hash('sha256','register:'.($_SERVER['REMOTE_ADDR']??'local'));
+        run($db,'DELETE FROM attempts WHERE until < ?',[time()]);
+        $attempt=run($db,'SELECT count,until FROM attempts WHERE key=?',[$ipKey])->fetch();
+        if($attempt&&(int)$attempt['until']>time()&&(int)$attempt['count']>=3)fail('С этого устройства создано слишком много кабинетов. Повторите через час.',429);
+
+        $name=textValue($data,'name',160,true);
+        $login=strtolower(textValue($data,'login',64,true));
+        if(!preg_match('/^[a-z0-9._-]{3,64}$/D',$login))fail('Логин: 3–64 латинских буквы, цифры, точки, дефисы или подчёркивания.');
+        $password=passwordValue($data);
+        $confirmation=$data['confirmation']??null;
+        if(!is_string($confirmation)||!hash_equals($password,$confirmation))fail('Пароли не совпадают.');
+        if(run($db,'SELECT id FROM users WHERE login=?',[$login])->fetch())fail('Этот логин уже занят.');
+
+        $db->exec('BEGIN IMMEDIATE');
+        try{
+            if(run($db,'SELECT id FROM users WHERE login=?',[$login])->fetch()){
+                $db->exec('ROLLBACK');
+                fail('Этот логин уже занят.');
+            }
+            run($db,"INSERT INTO users(name,login,password_hash,role) VALUES(?,?,?,'admin')",[$name,$login,password_hash($password,PASSWORD_DEFAULT)]);
+            $userId=(int)$db->lastInsertId();
+            run($db,'INSERT INTO attempts(key,count,until) VALUES(?,1,?) ON CONFLICT(key) DO UPDATE SET count=count+1,until=excluded.until',[$ipKey,time()+3600]);
+            $db->exec('COMMIT');
+        }catch(Throwable $error){
+            if($db->inTransaction())$db->exec('ROLLBACK');
+            throw $error;
+        }
+        $user=run($db,'SELECT * FROM users WHERE id=?',[$userId])->fetch();
+        session_regenerate_id(true);
+        $_SESSION['uid']=$user['id'];
+        $_SESSION['auth_version']=$user['auth_version'];
+        $_SESSION['last_seen']=time();
+        $_SESSION['csrf']=bin2hex(random_bytes(24));
+        clearRemember($db,$rememberCookie,$secure);
+        issueRemember($db,$user,$rememberCookie,$rememberLifetime,$secure);
+        reply(['user'=>publicUser($user),'csrf'=>$_SESSION['csrf']],201);
     }
     if (!$user) fail('Войдите в свой кабинет.',401);
     if ($action === 'push_state') {
