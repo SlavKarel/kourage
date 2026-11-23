@@ -124,3 +124,10 @@ html[data-theme=dark] .editor-files-head span{background:#2a374b;color:#eef3fb}
 /* Teacher self-registration on the sign-in screen. */
 .auth-switch{margin-top:22px;padding-top:20px;border-top:1px solid var(--border);color:var(--muted);font-size:.8125rem;text-align:center;line-height:1.6}
 .auth-switch button{padding:0;background:transparent;color:var(--blue);font:inherit;font-weight:600;text-decoration:underline;text-underline-offset:3px}
+
+/* Prominent, informational beta status for every teacher. */
+.early-access-badge{display:inline-flex;align-items:center;gap:7px;min-height:34px;padding:7px 11px;border:1px solid #b8d94f;border-radius:999px;background:linear-gradient(135deg,#eaff9a,#c9f475);color:#26331a;font-size:.72rem;font-weight:700;letter-spacing:.01em;white-space:nowrap;box-shadow:0 5px 16px #8eaa2d30}
+.early-access-badge>span{color:#5a7e00;font-size:.62rem}.early-access-badge>b{padding:3px 7px;border-radius:999px;background:#26331a;color:#f4ffd0;font-size:.64rem;text-transform:uppercase;letter-spacing:.05em}
+.early-access-floating{position:fixed;z-index:1400;top:14px;left:50%;transform:translateX(-50%)}
+html[data-theme=dark] .early-access-badge{border-color:#6f8d2a;background:linear-gradient(135deg,#d9f47c,#acd34f);color:#1d2911;box-shadow:0 6px 22px #0005}
+@media(max-width:720px){.early-access-badge{min-height:30px;padding:5px 8px;font-size:.66rem}.early-access-badge>b{display:none}.topbar>.early-access-badge{margin-left:auto}}
