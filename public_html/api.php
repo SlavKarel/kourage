@@ -1082,6 +1082,22 @@ try {
         }catch(Throwable $error){if($db->inTransaction())$db->exec('ROLLBACK');throw $error;}
         reply(['ok'=>true]);
     }
+    if($action==='owner_teacher_delete'){
+        requireOwner($db,$user);$teacherId=idValue($data,'id');$ownerId=ownerUserId($db);
+        if($teacherId===$ownerId)fail('Аккаунт владельца удалить нельзя.',409);
+        if(!run($db,"SELECT 1 FROM users WHERE id=? AND role='admin' AND deleted_at IS NULL",[$teacherId])->fetchColumn())fail('Преподаватель не найден.',404);
+        $db->exec('BEGIN IMMEDIATE');
+        try{
+            run($db,"UPDATE users SET active=0,auth_version=auth_version+1,deleted_at=strftime('%Y-%m-%dT%H:%M:%SZ','now') WHERE id=?",[$teacherId]);
+            run($db,'DELETE FROM remember_tokens WHERE user_id=?',[$teacherId]);
+            run($db,'DELETE FROM push_subscriptions WHERE user_id=?',[$teacherId]);
+            run($db,'DELETE FROM editor_presence_context WHERE user_id=?',[$teacherId]);
+            run($db,'DELETE FROM whiteboard_presence WHERE user_id=?',[$teacherId]);
+            run($db,"UPDATE meetings SET status='ended',ended_at=strftime('%Y-%m-%dT%H:%M:%SZ','now') WHERE teacher_id=? AND status='active'",[$teacherId]);
+            $db->exec('COMMIT');
+        }catch(Throwable $error){if($db->inTransaction())$db->exec('ROLLBACK');throw $error;}
+        reply(['ok'=>true]);
+    }
     if ($action === 'state') {
         $contexts=$user['role']==='student'?studentContexts($db,$user):[];
         $activeTeacherId=activeTeacherId($db,$user);
