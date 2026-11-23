@@ -16,7 +16,7 @@ session_name('kourage_session');
 session_set_cookie_params(['lifetime'=>0,'path'=>'/','secure'=>$secure,'httponly'=>true,'samesite'=>'Lax']);
 ini_set('session.use_strict_mode', '1');
 
-const DB_SCHEMA_VERSION = 1;
+const DB_SCHEMA_VERSION = 2;
 
 function kourageLog(string $message): void {
     global $private;
@@ -57,9 +57,23 @@ function publicUser(array $user): array {
     return array_intersect_key($user, array_flip(['id','name','login','role','active','created_at']));
 }
 function requireAdmin(array $user): void { if ($user['role'] !== 'admin') fail('Доступ только для преподавателя.',403); }
+function ownerUserId(PDO $db): int {
+    $stored=(int)(run($db,"SELECT value FROM app_meta WHERE key='owner_user_id'")->fetchColumn()?:0);
+    if($stored>0&&(bool)run($db,"SELECT 1 FROM users WHERE id=? AND role='admin' AND deleted_at IS NULL",[$stored])->fetchColumn())return $stored;
+    $owner=(int)$db->query("SELECT MIN(id) FROM users WHERE role='admin' AND deleted_at IS NULL")->fetchColumn();
+    if($owner>0)run($db,"INSERT INTO app_meta(key,value) VALUES('owner_user_id',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",[(string)$owner]);
+    return $owner;
+}
+function teacherAccessStatus(PDO $db, array $user): string {
+    if(($user['role']??'')!=='admin')return '';
+    if((int)$user['id']===ownerUserId($db))return 'owner';
+    $account=run($db,'SELECT access_type,subscription_until FROM teacher_accounts WHERE teacher_id=?',[$user['id']])->fetch();
+    if(!$account||$account['access_type']!=='subscription')return 'early_access';
+    return $account['subscription_until']===null||$account['subscription_until']===''||$account['subscription_until']>=gmdate('Y-m-d')?'subscription':'early_access';
+}
 function requireOwner(PDO $db, array $user): void {
     requireAdmin($user);
-    $ownerId = (int)$db->query("SELECT MIN(id) FROM users WHERE role='admin' AND deleted_at IS NULL")->fetchColumn();
+    $ownerId = ownerUserId($db);
     if ((int)$user['id'] !== $ownerId) fail('Добавлять преподавателей может только владелец кабинета.',403);
 }
 function requireOwnedStudent(PDO $db, array $user, int $studentId, bool $activeOnly = false): array {
@@ -213,10 +227,17 @@ try {
     CREATE INDEX IF NOT EXISTS idx_whiteboard_presence_seen ON whiteboard_presence(board_id,last_seen);
     CREATE TABLE IF NOT EXISTS push_subscriptions (id INTEGER PRIMARY KEY, user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE, endpoint TEXT NOT NULL UNIQUE, p256dh TEXT NOT NULL, auth TEXT NOT NULL, user_agent TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now')), updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now')));
     CREATE INDEX IF NOT EXISTS idx_push_subscriptions_user ON push_subscriptions(user_id,updated_at DESC);
-    CREATE TABLE IF NOT EXISTS attempts (key TEXT PRIMARY KEY, count INTEGER NOT NULL, until INTEGER NOT NULL);");
+    CREATE TABLE IF NOT EXISTS attempts (key TEXT PRIMARY KEY, count INTEGER NOT NULL, until INTEGER NOT NULL);
+    CREATE TABLE IF NOT EXISTS teacher_accounts (teacher_id INTEGER PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE, access_type TEXT NOT NULL DEFAULT 'early_access' CHECK(access_type IN ('owner','early_access','subscription')), subscription_until TEXT, note TEXT NOT NULL DEFAULT '', last_seen_at TEXT, updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now')));");
     $userColumns = array_column($db->query('PRAGMA table_info(users)')->fetchAll(),'name');
     if (!in_array('deleted_at',$userColumns,true)) $db->exec('ALTER TABLE users ADD COLUMN deleted_at TEXT');
     if (!in_array('teacher_id',$userColumns,true)) $db->exec('ALTER TABLE users ADD COLUMN teacher_id INTEGER');
+    $ownerId=(int)$db->query("SELECT MIN(id) FROM users WHERE role='admin' AND deleted_at IS NULL")->fetchColumn();
+    if($ownerId>0){
+        run($db,"INSERT INTO app_meta(key,value) VALUES('owner_user_id',?) ON CONFLICT(key) DO NOTHING",[(string)$ownerId]);
+        $ownerId=(int)(run($db,"SELECT value FROM app_meta WHERE key='owner_user_id'")->fetchColumn()?:$ownerId);
+        run($db,"INSERT INTO teacher_accounts(teacher_id,access_type) SELECT id,CASE WHEN id=? THEN 'owner' ELSE 'early_access' END FROM users WHERE role='admin' AND deleted_at IS NULL ON CONFLICT(teacher_id) DO UPDATE SET access_type=CASE WHEN teacher_accounts.teacher_id=? THEN 'owner' ELSE teacher_accounts.access_type END",[$ownerId,$ownerId]);
+    }
     $db->exec("UPDATE users SET teacher_id=(SELECT MIN(id) FROM users WHERE role='admin' AND deleted_at IS NULL) WHERE role='student' AND teacher_id IS NULL");
     $db->exec("INSERT OR IGNORE INTO student_teachers(student_id,teacher_id,subject) SELECT id,teacher_id,'Информатика' FROM users WHERE role='student' AND teacher_id IS NOT NULL AND deleted_at IS NULL");
     $db->exec('CREATE INDEX IF NOT EXISTS idx_users_teacher ON users(teacher_id,role,deleted_at,active,name)');
@@ -296,10 +317,15 @@ try {
     if (!$user) $user = restoreRemember($db,$rememberCookie,$secure);
     if ($user && time()-(int)($_SESSION['last_seen']??0)>=300) $_SESSION['last_seen'] = time();
     if ($user && $user['role']==='student') activeTeacherId($db,$user);
+    if($user&&$user['role']==='admin'){
+        $access=(int)$user['id']===ownerUserId($db)?'owner':'early_access';
+        run($db,'INSERT OR IGNORE INTO teacher_accounts(teacher_id,access_type) VALUES(?,?)',[$user['id'],$access]);
+        run($db,"UPDATE teacher_accounts SET last_seen_at=strftime('%Y-%m-%dT%H:%M:%SZ','now') WHERE teacher_id=? AND (last_seen_at IS NULL OR last_seen_at < strftime('%Y-%m-%dT%H:%M:%SZ','now','-5 minutes'))",[$user['id']]);
+    }
     $sessionWriteActions=['login','setup','register','logout','student_context','change_password'];
     if(!in_array($action,$sessionWriteActions,true))session_write_close();
-    if ($action === 'bootstrap' && $method === 'GET') reply(['installed'=>$installed,'user'=>$user ? publicUser($user) : null,'csrf'=>$_SESSION['csrf']]);
-    if ($method !== 'POST' && !in_array($action,['state','download','preview','classwork_state','classwork_download','classwork_preview','editor_state','editor_file','bank_state','bank_file_download','bank_file_view','homework_detail','homework_file_download','meeting_state','meeting_redirect','whiteboard_state','whiteboard_document','push_state'],true)) fail('Используйте POST.',405);
+    if ($action === 'bootstrap' && $method === 'GET') reply(['installed'=>$installed,'user'=>$user ? publicUser($user) : null,'access_status'=>$user?teacherAccessStatus($db,$user):'','csrf'=>$_SESSION['csrf']]);
+    if ($method !== 'POST' && !in_array($action,['state','owner_dashboard','download','preview','classwork_state','classwork_download','classwork_preview','editor_state','editor_file','bank_state','bank_file_download','bank_file_view','homework_detail','homework_file_download','meeting_state','meeting_redirect','whiteboard_state','whiteboard_document','push_state'],true)) fail('Используйте POST.',405);
     if ($action === 'login' || $action === 'setup') {
         run($db,'DELETE FROM remember_tokens WHERE expires_at < ?',[time()]);
         $remember = $data['remember'] ?? false;
@@ -321,6 +347,9 @@ try {
             $db->exec('BEGIN IMMEDIATE');
             if ($db->query("SELECT COUNT(*) FROM users WHERE role='admin'")->fetchColumn() > 0) { $db->exec('ROLLBACK'); fail('Настройка уже завершена.',409); }
             run($db,"INSERT INTO users(name,login,password_hash,role) VALUES(?,?,?,'admin')",[$name,$login,$hash]);
+            $newOwnerId=(int)$db->lastInsertId();
+            run($db,"INSERT INTO app_meta(key,value) VALUES('owner_user_id',?) ON CONFLICT(key) DO NOTHING",[(string)$newOwnerId]);
+            run($db,"INSERT OR IGNORE INTO teacher_accounts(teacher_id,access_type) VALUES(?,'owner')",[$newOwnerId]);
             $db->exec('COMMIT');
             @unlink($keyPath);
         }
@@ -359,6 +388,7 @@ try {
             }
             run($db,"INSERT INTO users(name,login,password_hash,role) VALUES(?,?,?,'admin')",[$name,$login,password_hash($password,PASSWORD_DEFAULT)]);
             $userId=(int)$db->lastInsertId();
+            run($db,"INSERT INTO teacher_accounts(teacher_id,access_type) VALUES(?,'early_access')",[$userId]);
             run($db,'INSERT INTO attempts(key,count,until) VALUES(?,1,?) ON CONFLICT(key) DO UPDATE SET count=count+1,until=excluded.until',[$ipKey,time()+3600]);
             $db->exec('COMMIT');
         }catch(Throwable $error){
@@ -1017,11 +1047,46 @@ try {
         $_SESSION['teacher_context_id']=$teacherId;
         reply(['ok'=>true]);
     }
+    if($action==='owner_dashboard'){
+        requireOwner($db,$user);
+        $ownerId=ownerUserId($db);
+        $teacherRows=$db->query("SELECT u.id,u.name,u.login,u.active,u.created_at,CASE WHEN u.id=$ownerId THEN 'owner' ELSE COALESCE(ta.access_type,'early_access') END AS access_type,ta.subscription_until,COALESCE(ta.note,'') AS note,ta.last_seen_at,(SELECT COUNT(DISTINCT st.student_id) FROM student_teachers st JOIN users su ON su.id=st.student_id WHERE st.teacher_id=u.id AND su.deleted_at IS NULL) AS student_count,(SELECT COUNT(*) FROM tasks t WHERE t.teacher_id=u.id AND t.deleted_at IS NULL) AS task_count,(SELECT COUNT(*) FROM homeworks h WHERE h.created_by=u.id AND h.deleted_at IS NULL) AS homework_count,(SELECT COUNT(*) FROM whiteboards w WHERE w.teacher_id=u.id AND w.deleted_at IS NULL) AS board_count FROM users u LEFT JOIN teacher_accounts ta ON ta.teacher_id=u.id WHERE u.role='admin' AND u.deleted_at IS NULL ORDER BY CASE WHEN u.id=$ownerId THEN 0 ELSE 1 END,u.name COLLATE NOCASE,u.id")->fetchAll();
+        $summary=['teachers'=>count($teacherRows),'active_7d'=>0,'students'=>0,'new_30d'=>0,'early_access'=>0,'subscribers'=>0];
+        $sevenDays=gmdate('Y-m-d\TH:i:s\Z',time()-7*86400);$thirtyDays=gmdate('Y-m-d\TH:i:s\Z',time()-30*86400);$today=gmdate('Y-m-d');
+        foreach($teacherRows as &$teacher){
+            $teacher['is_owner']=(int)$teacher['id']===$ownerId;
+            $subscription=$teacher['access_type']==='subscription'&&($teacher['subscription_until']===null||$teacher['subscription_until']===''||$teacher['subscription_until']>=$today);
+            $teacher['subscription_active']=$subscription;
+            if(!$teacher['is_owner']&&!$subscription)$summary['early_access']++;
+            if($subscription)$summary['subscribers']++;
+            if($teacher['last_seen_at']!==null&&$teacher['last_seen_at']>=$sevenDays)$summary['active_7d']++;
+            if($teacher['created_at']>=$thirtyDays)$summary['new_30d']++;
+            $summary['students']+=(int)$teacher['student_count'];
+        }unset($teacher);
+        reply(['summary'=>$summary,'teachers'=>$teacherRows]);
+    }
+    if($action==='owner_teacher_save'){
+        requireOwner($db,$user);$teacherId=idValue($data,'id');$ownerId=ownerUserId($db);
+        if(!run($db,"SELECT 1 FROM users WHERE id=? AND role='admin' AND deleted_at IS NULL",[$teacherId])->fetchColumn())fail('Преподаватель не найден.',404);
+        $name=textValue($data,'name',160,true);$note=textValue($data,'note',4000);$access=textValue($data,'access_type',30,true);
+        if(!in_array($access,['early_access','subscription'],true))fail('Некорректный статус подписки.');
+        $until=validDate(textValue($data,'subscription_until',10));
+        $active=$data['active']??null;if(!is_bool($active))fail('Некорректный статус доступа.');
+        if($teacherId===$ownerId){$access='owner';$until='';$active=true;}
+        $db->exec('BEGIN IMMEDIATE');
+        try{
+            run($db,'UPDATE users SET name=?,active=?,auth_version=auth_version+CASE WHEN active<>? THEN 1 ELSE 0 END WHERE id=?',[$name,(int)$active,(int)$active,$teacherId]);
+            run($db,"INSERT INTO teacher_accounts(teacher_id,access_type,subscription_until,note) VALUES(?,?,NULLIF(?,''),?) ON CONFLICT(teacher_id) DO UPDATE SET access_type=excluded.access_type,subscription_until=excluded.subscription_until,note=excluded.note,updated_at=strftime('%Y-%m-%dT%H:%M:%SZ','now')",[$teacherId,$access,$until,$note]);
+            if(!$active)run($db,'DELETE FROM remember_tokens WHERE user_id=?',[$teacherId]);
+            $db->exec('COMMIT');
+        }catch(Throwable $error){if($db->inTransaction())$db->exec('ROLLBACK');throw $error;}
+        reply(['ok'=>true]);
+    }
     if ($action === 'state') {
         $contexts=$user['role']==='student'?studentContexts($db,$user):[];
         $activeTeacherId=activeTeacherId($db,$user);
         if ($user['role'] === 'admin') {
-            $canManageTeachers = (int)$user['id'] === (int)$db->query("SELECT MIN(id) FROM users WHERE role='admin' AND deleted_at IS NULL")->fetchColumn();
+            $canManageTeachers = (int)$user['id'] === ownerUserId($db);
             $teachers = $canManageTeachers ? $db->query("SELECT id,name,login,role,active,created_at FROM users WHERE role='admin' AND deleted_at IS NULL ORDER BY name,id")->fetchAll() : [];
             $students = run($db,"SELECT u.id,u.name,u.login,u.role,u.teacher_id,u.active,u.created_at,st.subject FROM users u JOIN student_teachers st ON st.student_id=u.id WHERE u.role='student' AND st.teacher_id=? AND u.deleted_at IS NULL ORDER BY u.active DESC,u.name",[$user['id']])->fetchAll();
             $tasks = run($db,'SELECT tasks.*,users.name AS student_name FROM tasks JOIN users ON tasks.student_id=users.id WHERE tasks.teacher_id=? AND tasks.deleted_at IS NULL AND users.deleted_at IS NULL ORDER BY tasks.updated_at DESC,tasks.id DESC',[$user['id']])->fetchAll();
@@ -1038,7 +1103,7 @@ try {
         unset($item);
         $meeting=$user['role']==='student'?run($db,"SELECT id,status,expires_at,created_at FROM meetings WHERE student_id=? AND teacher_id=? AND status='active' AND expires_at>? ORDER BY id DESC LIMIT 1",[$user['id'],$activeTeacherId,time()])->fetch()?:null:null;
         $relations=$canManageTeachers?run($db,'SELECT st.student_id,st.teacher_id,st.subject,u.name AS teacher_name FROM student_teachers st JOIN users u ON u.id=st.teacher_id ORDER BY st.student_id,u.name')->fetchAll():[];
-        reply(['user'=>publicUser($user),'can_manage_teachers'=>$canManageTeachers,'teachers'=>$teachers,'students'=>$students,'tasks'=>$tasks,'homeworks'=>$homeworks,'meeting'=>$meeting,'contexts'=>$contexts,'active_teacher_id'=>$activeTeacherId,'student_teachers'=>$relations]);
+        reply(['user'=>publicUser($user),'access_status'=>teacherAccessStatus($db,$user),'can_manage_teachers'=>$canManageTeachers,'teachers'=>$teachers,'students'=>$students,'tasks'=>$tasks,'homeworks'=>$homeworks,'meeting'=>$meeting,'contexts'=>$contexts,'active_teacher_id'=>$activeTeacherId,'student_teachers'=>$relations]);
     }
     if ($action === 'change_password') {
         $old = textValue($data,'old_password',72,true);
@@ -1081,7 +1146,9 @@ try {
         if (run($db,'SELECT id FROM users WHERE login=?',[$login])->fetch()) fail('Этот логин уже занят.');
         $password = bin2hex(random_bytes(8));
         run($db,"INSERT INTO users(name,login,password_hash,role) VALUES(?,?,?,'admin')",[$name,$login,password_hash($password,PASSWORD_DEFAULT)]);
-        reply(['id'=>(int)$db->lastInsertId(),'name'=>$name,'login'=>$login,'role'=>'admin','password'=>$password],201);
+        $teacherId=(int)$db->lastInsertId();
+        run($db,"INSERT INTO teacher_accounts(teacher_id,access_type) VALUES(?,'early_access')",[$teacherId]);
+        reply(['id'=>$teacherId,'name'=>$name,'login'=>$login,'role'=>'admin','password'=>$password],201);
     }
     if ($action === 'reset_teacher_password') {
         requireOwner($db,$user); $id=idValue($data,'id');
